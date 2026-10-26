@@ -1,13 +1,23 @@
 @import "tailwindcss";
 
 :root {
-  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
-  color: #1e293b;
-  background: #f8fafc;
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  /* Backgrounds */
+  --color-bg: #F6F5FC;
+  --color-surface: #FFFFFF;
+  --color-sidebar: #F0EDFA;
+
+  /* Brand */
+  --color-primary: #8B80E8;
+  --color-primary-hover: #796DDA;
+  --color-primary-soft: #E9E4FF;
+
+  /* Text */
+  --color-text: #292544;
+  --color-text-secondary: #77738F;
+
+  /* Borders and shadows */
+  --color-border: #E7E3F0;
+  --color-shadow: 0 2px 5px rgba(48, 39, 90, 0.07);
 }
 
 * {
@@ -15,9 +25,8 @@
 }
 
 body {
-  margin: 0;
-  min-width: 320px;
-  min-height: 100vh;
+  background-color: var(--color-bg);
+  color: var(--color-text);
 }
 
 button, input, select {
