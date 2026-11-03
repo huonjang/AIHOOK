@@ -1,3 +1,4 @@
+import { api, type InvoiceReview } from '../services/api'
 import { useEffect, useState } from 'react'
 import {
   Upload,
@@ -13,10 +14,10 @@ import {
   LoaderCircle,
 } from 'lucide-react'
 
+const API_BASE_URL = 'http://127.0.0.1:8000'
 const MAX_FILE_SIZE = 10 * 1024 * 1024
 const ACCEPTED_TYPES = ['application/pdf', 'image/png', 'image/jpeg']
 const ACCEPTED_EXTENSIONS = /\.(pdf|png|jpe?g)$/i
-const API_BASE_URL = 'http://127.0.0.1:8000'
 
 function formatSize(bytes: number) {
   if (bytes < 1024 * 1024) {
@@ -39,10 +40,49 @@ function getStatusStyle(status: string) {
   if (status === 'Đang tải lên') {
     return 'bg-amber-50 text-amber-700'
   }
-  if (status === 'Đã tải lên') {
+  if (status === 'Đã tải lên' || status === 'Đã xác nhận') {
     return 'bg-emerald-50 text-emerald-700'
   }
   return 'bg-[#F0EDFA] text-[#7567BC]'
+}
+
+// 1. Hàm chuẩn hóa dữ liệu ngày và số tiền
+function normalizeDateForInput(value: unknown): string {
+  if (!value) return ''
+
+  const date = String(value).trim()
+
+  // Ngày đã ở định dạng YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return date
+  }
+
+  // Ngày OCR ở định dạng DD/MM/YYYY hoặc DD-MM-YYYY
+  const match = date.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/)
+
+  if (match) {
+    const [, day, month, year] = match
+    return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`
+  }
+
+  return ''
+}
+
+function normalizeAmountForInput(value: unknown): string {
+  if (value === null || value === undefined || value === '') return ''
+
+  // Chuẩn hóa số tiền kiểu Việt Nam, ví dụ 6.501.600 -> 6501600
+  const amount = String(value).trim()
+
+  if (/^-?\d{1,3}(\.\d{3})+$/.test(amount)) {
+    return amount.replace(/\./g, '')
+  }
+
+  if (/^-?\d{1,3}(,\d{3})+$/.test(amount)) {
+    return amount.replace(/,/g, '')
+  }
+
+  return amount
 }
 
 export default function InvoicesPage() {
@@ -60,7 +100,20 @@ export default function InvoicesPage() {
   const [analyzingId, setAnalyzingId] = useState<string | null>(null)
   const [analysisResult, setAnalysisResult] = useState<any>(null)
 
-  // 1. Tải danh sách hóa đơn từ máy chủ SQLite
+  // Các state phục vụ chỉnh sửa & xác nhận hóa đơn
+  const [reviewInvoiceId, setReviewInvoiceId] = useState<number | string | null>(null)
+  const [reviewFields, setReviewFields] = useState({
+    invoice_number: '',
+    invoice_date: '',
+    seller_name: '',
+    seller_tax_code: '',
+    total_amount: '',
+  })
+  const [isSavingReview, setIsSavingReview] = useState(false)
+  const [isConfirming, setIsConfirming] = useState(false)
+  const [reviewMessage, setReviewMessage] = useState('')
+
+  // Tải danh sách hóa đơn qua api.getInvoices()
   useEffect(() => {
     let cancelled = false
 
@@ -68,17 +121,12 @@ export default function InvoicesPage() {
       setIsLoading(true)
 
       try {
-        const response = await fetch(`${API_BASE_URL}/api/invoices`)
+        const data = await api.getInvoices()
 
-        if (!response.ok) {
-          throw new Error(`Không thể tải danh sách (HTTP ${response.status}).`)
-        }
-
-        const data = await response.json()
         if (cancelled) return
 
         const savedInvoices = data.map((item: any) => ({
-          id: item.id,
+          id: String(item.id),
           serverId: item.id,
           file: {
             name: item.filename,
@@ -90,12 +138,16 @@ export default function InvoicesPage() {
                 : 'image/jpeg',
             lastModified: 0,
           },
-          status: item.status === 'uploaded' ? 'Đã tải lên' : item.status,
+          status:
+            item.status === 'uploaded'
+              ? 'Đã tải lên'
+              : item.status === 'confirmed'
+                ? 'Đã xác nhận'
+                : item.status,
           addedAt: item.created_at,
         }))
 
         setInvoices((current) => {
-          // Giữ các file đang upload cục bộ nếu có
           const localUploads = current.filter((invoice) => !invoice.serverId)
 
           return [
@@ -140,48 +192,145 @@ export default function InvoicesPage() {
     }
   }, [preview])
 
-  // Hàm gọi phân tích OCR (đã tách ra khỏi useEffect)
+  // 2. Gọi OCR và đưa dữ liệu đã chuẩn hóa vào form
   const analyzeInvoice = async (invoice: any) => {
     const invoiceId = invoice.serverId || invoice.id
 
-    if (!invoiceId) {
+    if (!invoice.serverId) {
       setErrors((current) => [
         ...current,
-        'Không tìm thấy ID hóa đơn trên máy chủ.',
+        'Hóa đơn chưa được lưu trên máy chủ.',
       ])
       return
     }
 
     setAnalyzingId(invoice.id)
-    setAnalysisResult(null)
+    setReviewMessage('')
 
     try {
-      const response = await fetch(
-        `${API_BASE_URL}/api/invoices/${invoiceId}/analyze`,
-        { method: 'POST' },
+      const result = await api.analyzeInvoice(invoiceId)
+
+      setReviewInvoiceId(invoiceId)
+      setReviewFields({
+        invoice_number: result.invoice_number ?? '',
+        invoice_date: normalizeDateForInput(result.invoice_date),
+        seller_name: result.seller_name ?? '',
+        seller_tax_code: (result as any).seller_tax_code ?? '',
+        total_amount: normalizeAmountForInput(result.total_amount),
+      })
+
+      setInvoices((current) =>
+        current.map((item) =>
+          String(item.serverId) === String(invoiceId)
+            ? {
+                ...item,
+                status:
+                  result.verification_status === 'confirmed'
+                    ? 'Đã xác nhận'
+                    : 'Cần kiểm tra',
+              }
+            : item,
+        ),
       )
-
-      const result = await response.json()
-
-      if (!response.ok) {
-        throw new Error(result.detail || `Lỗi HTTP ${response.status}`)
-      }
 
       setAnalysisResult(result)
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Lỗi không xác định'
-
       setErrors((current) => [
         ...current,
-        `Không thể phân tích ${invoice.file.name}: ${message}`,
+        `Không thể phân tích ${invoice.file.name}: ${
+          error instanceof Error ? error.message : 'Lỗi không xác định'
+        }`,
       ])
     } finally {
       setAnalyzingId(null)
     }
   }
 
-  // Xử lý tải lên file
+  // Lưu chỉnh sửa thông tin hóa đơn
+  const saveReview = async () => {
+    if (reviewInvoiceId === null) return
+
+    setIsSavingReview(true)
+    setReviewMessage('')
+
+    try {
+      await api.reviewInvoice(reviewInvoiceId, {
+        invoice_number: reviewFields.invoice_number.trim(),
+        invoice_date: reviewFields.invoice_date || null,
+        seller_name: reviewFields.seller_name.trim(),
+        seller_tax_code: reviewFields.seller_tax_code.trim(),
+        total_amount: reviewFields.total_amount.trim(),
+      } as any)
+
+      setReviewMessage('Đã lưu chỉnh sửa thành công.')
+    } catch (error) {
+      setErrors((current) => [
+        ...current,
+        `Không thể lưu chỉnh sửa: ${
+          error instanceof Error ? error.message : 'Lỗi không xác định'
+        }`,
+      ])
+    } finally {
+      setIsSavingReview(false)
+    }
+  }
+
+  // Xác nhận hóa đơn
+  const confirmReview = async () => {
+    if (reviewInvoiceId === null) return
+
+    if (
+      !reviewFields.invoice_number.trim() ||
+      !reviewFields.invoice_date ||
+      !reviewFields.seller_name.trim() ||
+      !reviewFields.total_amount.trim() ||
+      !Number.isFinite(Number(reviewFields.total_amount)) ||
+      Number(reviewFields.total_amount) < 0
+    ) {
+      setReviewMessage(
+        'Vui lòng kiểm tra mã hóa đơn, ngày lập, đơn vị bán và tổng tiền hợp lệ trước khi xác nhận.',
+      )
+      return
+    }
+
+    setIsConfirming(true)
+    setReviewMessage('')
+
+    try {
+      await api.reviewInvoice(reviewInvoiceId, {
+        invoice_number: reviewFields.invoice_number.trim(),
+        invoice_date: reviewFields.invoice_date,
+        seller_name: reviewFields.seller_name.trim(),
+        seller_tax_code: reviewFields.seller_tax_code.trim(),
+        total_amount: reviewFields.total_amount.trim(),
+      } as any)
+
+      await api.confirmInvoice(reviewInvoiceId)
+
+      setInvoices((current) =>
+        current.map((invoice) =>
+          String(invoice.serverId) === String(reviewInvoiceId)
+            ? { ...invoice, status: 'Đã xác nhận' }
+            : invoice,
+        ),
+      )
+
+      setAnalysisResult(null)
+      setReviewInvoiceId(null)
+      setReviewMessage('')
+    } catch (error) {
+      setErrors((current) => [
+        ...current,
+        `Không thể xác nhận hóa đơn: ${
+          error instanceof Error ? error.message : 'Lỗi không xác định'
+        }`,
+      ])
+    } finally {
+      setIsConfirming(false)
+    }
+  }
+
+  // Tải lên tệp qua api.uploadInvoice()
   const handleFiles = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const input = event.target
     const selectedFiles = Array.from(input.files || [])
@@ -244,29 +393,7 @@ export default function InvoicesPage() {
 
     for (const invoice of newInvoices) {
       try {
-        const formData = new FormData()
-        formData.append('file', invoice.file)
-
-        const response = await fetch(`${API_BASE_URL}/api/invoices/upload`, {
-          method: 'POST',
-          body: formData,
-        })
-
-        let result: any = {}
-        try {
-          result = await response.json()
-        } catch {
-          // Xử lý server không phản hồi JSON
-        }
-
-        if (!response.ok) {
-          const message =
-            typeof result.detail === 'string'
-              ? result.detail
-              : `Máy chủ trả về lỗi HTTP ${response.status}.`
-
-          throw new Error(message)
-        }
+        const result = await api.uploadInvoice(invoice.file)
 
         setInvoices((current) =>
           current.map((item) =>
@@ -279,7 +406,7 @@ export default function InvoicesPage() {
               : item,
           ),
         )
-      } catch (error: any) {
+      } catch (error) {
         setInvoices((current) =>
           current.map((item) =>
             item.id === invoice.id
@@ -290,7 +417,9 @@ export default function InvoicesPage() {
 
         newErrors.push(
           `${invoice.file.name}: ${
-            error.message || 'Không thể kết nối backend. Hãy kiểm tra FastAPI.'
+            error instanceof Error
+              ? error.message
+              : 'Không thể kết nối backend.'
           }`,
         )
       }
@@ -299,7 +428,7 @@ export default function InvoicesPage() {
     setErrors(newErrors)
   }
 
-  // Xóa hóa đơn
+  // Xóa hóa đơn qua api.deleteInvoice()
   const removeInvoice = async (id: string) => {
     const invoice = invoices.find((item) => item.id === id)
     if (!invoice) return
@@ -312,23 +441,7 @@ export default function InvoicesPage() {
     setIsDeleting(id)
 
     try {
-      const response = await fetch(
-        `${API_BASE_URL}/api/invoices/${invoice.serverId}`,
-        { method: 'DELETE' },
-      )
-
-      if (!response.ok) {
-        let message = `Máy chủ trả về lỗi HTTP ${response.status}.`
-        try {
-          const result = await response.json()
-          if (typeof result.detail === 'string') {
-            message = result.detail
-          }
-        } catch {
-          // Giữ thông báo lỗi mặc định
-        }
-        throw new Error(message)
-      }
+      await api.deleteInvoice(invoice.serverId)
 
       setInvoices((current) => current.filter((item) => item.id !== id))
 
@@ -338,10 +451,12 @@ export default function InvoicesPage() {
       ) {
         setPreview(null)
       }
-    } catch (error: any) {
+    } catch (error) {
       setErrors((current) => [
         ...current,
-        `Không thể xóa ${invoice.file.name}: ${error.message}`,
+        `Không thể xóa ${invoice.file.name}: ${
+          error instanceof Error ? error.message : 'Lỗi không xác định'
+        }`,
       ])
     } finally {
       setIsDeleting(null)
@@ -652,17 +767,17 @@ export default function InvoicesPage() {
         )}
       </section>
 
-      {/* Modal Kết quả OCR */}
+      {/* 3. Modal Kết quả OCR & Form chỉnh sửa */}
       {analysisResult && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-[#E9E4F5] p-5">
               <div>
                 <h2 className="text-lg font-bold text-[#302653]">
-                  Kết quả phân tích hóa đơn
+                  Kết quả phân tích & Chỉnh sửa
                 </h2>
                 <p className="mt-1 text-sm text-[#817B9D]">
-                  Văn bản được trích xuất bằng OCR
+                  Kiểm tra văn bản trích xuất OCR và xác nhận dữ liệu hóa đơn
                 </p>
               </div>
 
@@ -677,29 +792,147 @@ export default function InvoicesPage() {
             </div>
 
             <div className="space-y-4 p-5">
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                {[
-                  ['Mã hóa đơn', analysisResult.invoice_number],
-                  ['Ngày lập', analysisResult.invoice_date],
-                  ['Đơn vị bán', analysisResult.seller_name],
-                  ['Tổng tiền', analysisResult.total_amount],
-                ].map(([label, value]) => (
-                  <div
-                    key={label}
-                    className="rounded-xl border border-[#E9E4F5] bg-[#FAF9FF] p-4"
-                  >
-                    <p className="text-sm text-[#817B9D]">{label}</p>
-                    <p className="mt-2 break-words font-semibold text-[#302653]">
-                      {value || 'Chưa trích xuất được'}
-                    </p>
-                  </div>
-                ))}
+              {/* Kết quả OCR ban đầu, chỉ đọc */}
+              <section className="space-y-3">
+                <h3 className="font-semibold text-[#302653]">
+                  Kết quả OCR nhận diện
+                </h3>
+
+                <p className="text-sm text-[#817B9D]">
+                  Dữ liệu được trích xuất tự động trước khi bạn chỉnh sửa.
+                </p>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  {[
+                    ['Mã hóa đơn', analysisResult.invoice_number],
+                    ['Ngày lập', analysisResult.invoice_date],
+                    ['Đơn vị bán', analysisResult.seller_name],
+                    ['Mã số thuế', analysisResult.seller_tax_code],
+                    ['Tổng tiền', analysisResult.total_amount],
+                  ].map(([label, value]) => (
+                    <div
+                      key={String(label)}
+                      className="rounded-xl border border-[#E9E4F5] bg-[#FAF9FF] p-4"
+                    >
+                      <p className="text-sm text-[#817B9D]">{label}</p>
+
+                      <p className="mt-2 break-words font-semibold text-[#302653]">
+                        {value !== null && value !== undefined && String(value).trim() !== ''
+                          ? String(value)
+                          : 'Chưa trích xuất được'}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              <div className="border-t border-[#E9E4F5]" />
+
+              {/* Form chỉnh sửa */}
+              <h3 className="font-semibold text-[#302653]">
+                Chỉnh sửa thông tin hóa đơn
+              </h3>
+
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <label className="block">
+                  <span className="text-sm font-medium text-[#51427F]">
+                    Mã hóa đơn *
+                  </span>
+                  <input
+                    value={reviewFields.invoice_number}
+                    onChange={(event) =>
+                      setReviewFields((current) => ({
+                        ...current,
+                        invoice_number: event.target.value,
+                      }))
+                    }
+                    className="mt-2 w-full rounded-xl border border-[#E7E3F0] px-3 py-2.5 text-sm outline-none focus:border-[#8B80E8]"
+                    placeholder="Nhập mã hóa đơn"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="text-sm font-medium text-[#51427F]">
+                    Ngày lập *
+                  </span>
+                  <input
+                    type="date"
+                    value={reviewFields.invoice_date}
+                    onChange={(event) =>
+                      setReviewFields((current) => ({
+                        ...current,
+                        invoice_date: event.target.value,
+                      }))
+                    }
+                    className="mt-2 w-full rounded-xl border border-[#E7E3F0] px-3 py-2.5 text-sm outline-none focus:border-[#8B80E8]"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="text-sm font-medium text-[#51427F]">
+                    Đơn vị bán *
+                  </span>
+                  <input
+                    value={reviewFields.seller_name}
+                    onChange={(event) =>
+                      setReviewFields((current) => ({
+                        ...current,
+                        seller_name: event.target.value,
+                      }))
+                    }
+                    className="mt-2 w-full rounded-xl border border-[#E7E3F0] px-3 py-2.5 text-sm outline-none focus:border-[#8B80E8]"
+                    placeholder="Nhập tên đơn vị bán"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="text-sm font-medium text-[#51427F]">
+                    Mã số thuế
+                  </span>
+                  <input
+                    value={reviewFields.seller_tax_code}
+                    onChange={(event) =>
+                      setReviewFields((current) => ({
+                        ...current,
+                        seller_tax_code: event.target.value,
+                      }))
+                    }
+                    className="mt-2 w-full rounded-xl border border-[#E7E3F0] px-3 py-2.5 text-sm outline-none focus:border-[#8B80E8]"
+                    placeholder="Nhập mã số thuế"
+                  />
+                </label>
+
+                <label className="block sm:col-span-2">
+                  <span className="text-sm font-medium text-[#51427F]">
+                    Tổng tiền *
+                  </span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    value={reviewFields.total_amount}
+                    onChange={(event) =>
+                      setReviewFields((current) => ({
+                        ...current,
+                        total_amount: event.target.value,
+                      }))
+                    }
+                    className="mt-2 w-full rounded-xl border border-[#E7E3F0] px-3 py-2.5 text-sm outline-none focus:border-[#8B80E8]"
+                    placeholder="Nhập tổng tiền"
+                  />
+                </label>
               </div>
 
-              <div className="rounded-xl bg-[#FFF8E8] p-4 text-sm text-[#805D19]">
-                Kết quả OCR có thể sai lệch. Hãy đối chiếu với hóa đơn gốc trước khi
-                sử dụng dữ liệu hoặc đưa ra cảnh báo.
+              <div className="rounded-xl bg-[#FFF8E8] p-4 text-sm leading-6 text-[#805D19]">
+                Kết quả OCR có thể sai lệch. Hãy đối chiếu với hóa đơn gốc và chỉnh sửa
+                các trường bên trên trước khi xác nhận.
               </div>
+
+              {reviewMessage && (
+                <p className="rounded-lg bg-[#F3F0FF] p-3 text-sm text-[#51427F]">
+                  {reviewMessage}
+                </p>
+              )}
 
               <details className="rounded-xl border border-[#E9E4F5] p-4">
                 <summary className="cursor-pointer font-medium text-[#51427F]">
@@ -711,13 +944,32 @@ export default function InvoicesPage() {
               </details>
             </div>
 
-            <div className="flex justify-end border-t border-[#E9E4F5] p-4">
+            {/* Footer modal có đầy đủ các nút thao tác */}
+            <div className="flex flex-wrap justify-end gap-3 border-t border-[#E9E4F5] p-4">
               <button
                 type="button"
                 onClick={() => setAnalysisResult(null)}
-                className="rounded-xl bg-[#8C7BEF] px-5 py-2.5 font-medium text-white hover:bg-[#7967E5]"
+                className="rounded-xl border border-[#E7E3F0] px-4 py-2.5 text-sm font-medium text-[#51427F] hover:bg-[#F7F5FC]"
               >
                 Đóng
+              </button>
+
+              <button
+                type="button"
+                onClick={saveReview}
+                disabled={isSavingReview || isConfirming}
+                className="rounded-xl border border-[#DCD5FF] px-4 py-2.5 text-sm font-medium text-[#7465D8] hover:bg-[#F3F0FF] disabled:opacity-50"
+              >
+                {isSavingReview ? 'Đang lưu...' : 'Lưu chỉnh sửa'}
+              </button>
+
+              <button
+                type="button"
+                onClick={confirmReview}
+                disabled={isSavingReview || isConfirming}
+                className="rounded-xl bg-[#8C7BEF] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#7967E5] disabled:opacity-50"
+              >
+                {isConfirming ? 'Đang xác nhận...' : 'Xác nhận'}
               </button>
             </div>
           </div>
