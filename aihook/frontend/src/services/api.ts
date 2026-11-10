@@ -89,18 +89,44 @@ export interface AnalyticsDashboard {
   start_date: string | null
   end_date: string | null
   currency: string
-  overview: { invoice_count: number; total_amount: string; average_amount: string; supplier_count: number; undated_count: number }
+  overview: { invoice_count: number; total_amount: string; average_amount: string; supplier_count: number; undated_count: number; undated_total_amount: string }
   monthly: { month: string; invoice_count: number; total_amount: string }[]
   suppliers: { seller_name: string; seller_tax_code: string | null; invoice_count: number; total_amount: string }[]
 }
 
+export interface ChatEvidence {
+  title: string
+  columns: string[]
+  rows: (string | number | null)[][]
+}
+
+export interface ChatValidation {
+  status: 'passed' | 'warning' | 'not_applicable'
+  passed_checks: number
+  total_checks: number
+  checks: { code: string; label: string; passed: boolean; expected?: string; actual?: string }[]
+}
+
 export interface ChatReply {
-  answer: string; mode: string; scope: string; source_note: string
-  sources: { invoice_id: number; invoice_number: string | null; total_amount: string; source_page: number | null }[]
+  answer: string
+  mode: string
+  scope: string
+  source_note: string
+  sources: {
+    invoice_id: number
+    invoice_number: string | null
+    seller_name?: string | null
+    total_amount: string
+    invoice_date?: string | null
+    source_page: number | null
+  }[]
+  evidence?: ChatEvidence[]
+  validation?: ChatValidation
+  tools_used?: string[]
 }
 
 export const api = {
-  getChatStatus: () => request<{ ai_configured: boolean }>('/api/chat/status'),
+  getChatStatus: () => request<{ ai_configured: boolean; function_calling?: boolean }>('/api/chat/status'),
   askQuestion: (message: string, start: string, end: string, useAI: boolean) => request<ChatReply>('/api/chat', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message, start_date: start || null, end_date: end || null, use_ai: useAI }),

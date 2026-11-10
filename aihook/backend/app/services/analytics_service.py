@@ -24,6 +24,7 @@ def get_analytics(db: Session, business_id: int, start: date | None, end: date |
     monthly = {}
     suppliers = {}
     undated_count = 0
+    undated_total = Decimal('0')
     for invoice in invoices:
         value = invoice.total_amount or Decimal('0')
         total += value
@@ -34,6 +35,7 @@ def get_analytics(db: Session, business_id: int, start: date | None, end: date |
             item['amount'] += value
         else:
             undated_count += 1
+            undated_total += value
         name = ' '.join((invoice.seller_name or '').split()) or 'Chưa rõ đơn vị bán'
         tax = (invoice.seller_tax_code or '').strip() or None
         key = ('tax', tax) if tax else ('name', name.casefold())
@@ -54,7 +56,8 @@ def get_analytics(db: Session, business_id: int, start: date | None, end: date |
         'business_id': business_id, 'start_date': start, 'end_date': end, 'currency': 'VND',
         'overview': {'invoice_count': len(invoices), 'total_amount': money(total),
                      'average_amount': money(total / len(invoices)) if invoices else '0.00',
-                     'supplier_count': len(suppliers), 'undated_count': undated_count},
+                     'supplier_count': len(suppliers), 'undated_count': undated_count,
+                     'undated_total_amount': money(undated_total)},
         'monthly': [{'month': month, 'invoice_count': item['count'], 'total_amount': money(item['amount'])}
                     for month, item in sorted(monthly.items())],
         'suppliers': [{'seller_name': s['name'], 'seller_tax_code': s['tax_code'],

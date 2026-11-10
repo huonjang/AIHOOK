@@ -26,7 +26,7 @@ def test_totals_months_suppliers_and_read_only(client):
     response=api.get('/api/analytics/dashboard')
     assert response.status_code == 200
     data=response.json()
-    assert data['overview'] == {'invoice_count':3,'total_amount':'350.30','average_amount':'116.77','supplier_count':2,'undated_count':0}
+    assert data['overview'] == {'invoice_count':3,'total_amount':'350.30','average_amount':'116.77','supplier_count':2,'undated_count':0,'undated_total_amount':'0.00'}
     assert [r['month'] for r in data['monthly']] == ['2026-01','2026-02','2026-03']
     assert data['monthly'][1]['total_amount'] == '0.00'
     assert data['suppliers'][0]['total_amount'] == '300.30'
@@ -63,6 +63,7 @@ def test_undated_legacy_invoice(client):
         db.commit()
     data=api.get('/api/analytics/dashboard').json()
     assert data['overview']['undated_count']==1
+    assert data['overview']['undated_total_amount']=='10.00'
     assert data['overview']['total_amount']=='10.00'
     assert data['monthly']==[]
     assert api.get('/api/analytics/dashboard?start_date=2026-01-01&end_date=2026-12-31').json()['overview']['invoice_count']==0
