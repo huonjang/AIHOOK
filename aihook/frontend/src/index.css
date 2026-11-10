@@ -1,0 +1,38 @@
+@import "tailwindcss";
+
+:root {
+  /* Backgrounds */
+  --color-bg: #F6F5FC;
+  --color-surface: #FFFFFF;
+  --color-sidebar: #F0EDFA;
+
+  /* Brand */
+  --color-primary: #8B80E8;
+  --color-primary-hover: #796DDA;
+  --color-primary-soft: #E9E4FF;
+
+  /* Text */
+  --color-text: #292544;
+  --color-text-secondary: #77738F;
+
+  /* Borders and shadows */
+  --color-border: #E7E3F0;
+  --color-shadow: 0 2px 5px rgba(48, 39, 90, 0.07);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+}
+
+button, input, select {
+  font: inherit;
+}
+
+button, a {
+  -webkit-tap-highlight-color: transparent;
+}
