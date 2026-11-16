@@ -42,7 +42,7 @@ export default function AIAssistantPage() {
       <label className="flex flex-col gap-1.5 text-xs text-[#9fb6cc]">Đến ngày<input className="app-input text-sm" type="date" value={end} onChange={e=>setEnd(e.target.value)}/></label>
       <button className="app-button-primary text-sm" type="button" onClick={applyScope}>Áp dụng</button><button className="app-button-secondary" type="button" onClick={clearScope}>Toàn thời gian</button>
       {error && <p role="alert" className="w-full text-sm text-[#ffb2bb]">{error}</p>}
-      <p className="w-full text-xs text-[#829eb8]">Áp dụng bộ lọc sẽ bắt đầu một phiên hiển thị mới; các câu hỏi vẫn được backend xử lý độc lập, chưa có ghi nhớ hội thoại.</p>
+      <p className="w-full text-xs text-[#829eb8]">Áp dụng bộ lọc sẽ bắt đầu hội thoại mới. Các câu hỏi tiếp nối giữ chủ đề và tiêu chí trong phạm vi dữ liệu đang chọn.</p>
     </section>
 
     <InvoiceChat key={`${scope.start}:${scope.end}`} start={scope.start} end={scope.end}/>

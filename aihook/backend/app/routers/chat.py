@@ -6,6 +6,7 @@ import os
 import re
 from datetime import date
 from decimal import Decimal
+from typing import Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,7 +21,8 @@ from app.ocr_service import normalize_text
 from app.services.analytics_service import get_analytics
 from app.services.analytics_narrative import build_observations, build_recommendations
 from app.services.invoice_ai_tools import INVOICE_TOOLS, execute_invoice_tool
-from app.services.invoice_intelligence import recognize_intent, focused_response
+from app.services.invoice_intelligence import focused_response
+from app.services.intelligence_engine import process_question
 from app.services.numerical_validation import validate_analytics
 
 logger = logging.getLogger(__name__)
@@ -28,11 +30,23 @@ router = APIRouter(prefix='/api/chat', tags=['Invoice Q&A'])
 MAX_TOOL_CALLS = 4
 
 
+class ConversationContext(BaseModel):
+    topic: str = Field(default='', max_length=30)
+    role: Literal['supplier', 'customer'] = 'supplier'
+    criterion: Literal['amount', 'count'] = 'amount'
+    limit: int = Field(default=5, ge=1, le=30)
+    query_start: date | None = None
+    query_end: date | None = None
+    scope_start: date | None = None
+    scope_end: date | None = None
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     start_date: date | None = None
     end_date: date | None = None
     use_ai: bool = False
+    context: ConversationContext | None = None
 
 
 def configured():
@@ -431,34 +445,6 @@ def _fallback_tool_calls(question: str) -> list[dict] | None:
     return None
 
 
-def _preset_tool_calls(question: str) -> list[dict] | None:
-    """UI suggestions have fixed intent; the model must not invent filters."""
-    presets = {
-        'Phân tích tổng quan các hóa đơn đã xác nhận. Nêu xu hướng, điểm đáng chú ý và giới hạn dữ liệu.': [
-            ('get_invoice_overview', {}), ('get_monthly_summary', {}),
-            ('get_supplier_summary', {'sort_by': 'amount', 'limit': 10})],
-        'Nhà cung cấp nào có tổng giá trị hóa đơn lớn nhất? So sánh nhóm đứng đầu theo tổng giá trị và số lượng.': [
-            ('get_supplier_summary', {'sort_by': 'amount', 'limit': 10}),
-            ('get_supplier_summary', {'sort_by': 'count', 'limit': 10})],
-        'Tháng nào có tổng giá trị hóa đơn cao nhất? So sánh với các tháng khác đã hoàn tất.': [
-            ('get_monthly_summary', {})],
-        'Kiểm tra tính nhất quán giữa tổng tiền, trung bình, số lượng và thống kê theo tháng.': [
-            ('get_invoice_overview', {}), ('get_monthly_summary', {})],
-        'Đưa ra 5 khuyến nghị giúp tôi quản lý dữ liệu hóa đơn tốt hơn, dựa trên dữ liệu đã ghi nhận.': [
-            ('get_invoice_overview', {}), ('get_monthly_summary', {}),
-            ('get_supplier_summary', {'sort_by': 'amount', 'limit': 10})],
-    }
-    key = normalize_text(question).lower().strip().rstrip('.!?')
-    for prompt, selections in presets.items():
-        if key == normalize_text(prompt).lower().strip().rstrip('.!?'):
-            return [
-                {'id': f'aihook_preset_{index}', 'type': 'function',
-                 'function': {'name': name, 'arguments': json.dumps(arguments)}}
-                for index, (name, arguments) in enumerate(selections)
-            ]
-    return None
-
-
 def _normalize_model_calls(question: str, calls: list[dict]) -> list[dict]:
     """Keep model-generated query arguments aligned with the user's intent."""
     normalized = normalize_text(question).lower()
@@ -498,35 +484,12 @@ def run_ai_agent(
     business_id: int,
     scope_start: date | None,
     scope_end: date | None,
+    context: dict | None = None,
 ) -> dict:
-    """Run one tool-selection call and one synthesis call against the model."""
-    intent = recognize_intent(question)
-    if intent and intent[0] in ('supplier', 'customer', 'date', 'recommendation', 'comparison_windows'):
-        kind, arguments = intent
-        # Only route directly when temporal intent can be resolved exactly.
-        normalized = normalize_text(question).lower()
-        dates = re.findall(r'\b\d{4}-\d{2}-\d{2}\b', normalized)
-        month = re.search(r'thang\s+(\d{1,2})\s*[/\-]\s*(\d{4})', normalized)
-        temporal = bool(re.search(r'\b(?:thang|tuan|quy|nam|hom nay|hom qua|ngay|\d{4})\b', normalized))
-        resolved = False
-        if dates and len(dates) <= 2:
-            arguments.update(start_date=dates[0], end_date=dates[-1])
-            resolved = True
-        elif month and 1 <= int(month[1]) <= 12:
-            year, number = int(month[2]), int(month[1])
-            arguments.update(start_date=date(year, number, 1).isoformat(),
-                             end_date=date(year, number, calendar.monthrange(year, number)[1]).isoformat())
-            resolved = True
-        # "Ngày lập sớm nhất" describes a field, not a requested date range.
-        date_field_only = kind == 'date' and not re.search(r'\d|thang|tuan|quy|nam|hom nay|hom qua', normalized)
-        if not temporal or resolved or date_field_only or kind == 'comparison_windows' or 'toan bo thoi gian' in normalized:
-            name = {'supplier': 'get_supplier_rankings', 'customer': 'get_customer_rankings',
-                    'date': 'get_invoice_date_extremes', 'recommendation': 'get_invoice_recommendations',
-                    'comparison_windows': 'compare_invoice_data_windows'}[kind]
-            result = execute_invoice_tool(name, arguments, db, business_id, scope_start, scope_end)
-            answer, evidence = focused_response(name, result)
-            return {'answer': answer, 'evidence': evidence, 'sources': _collect_sources([(name, result)]),
-                    'validation': _collect_validation([(name, result)]), 'tools_used': [name]}
+    """Route structured questions first; use the model only for open tool selection."""
+    routed = process_question(question, db, business_id, scope_start, scope_end, context)
+    if routed is not None:
+        return routed
     messages = [
         {'role': 'system', 'content': _system_prompt(scope_start, scope_end)},
         {'role': 'system', 'content': (
@@ -538,23 +501,7 @@ def run_ai_agent(
         )},
         {'role': 'user', 'content': question},
     ]
-    preset_calls = _preset_tool_calls(question)
-    if not preset_calls and intent:
-        normalized = normalize_text(question).lower()
-        if intent[0] == 'comparison':
-            candidate = _fallback_tool_calls(question)
-            if candidate and candidate[0]['function']['name'] == 'compare_periods':
-                preset_calls = candidate
-        elif intent[0] in ('overview', 'validation') and not re.search(
-            r'\d|\b(?:thang nay|thang truoc|tuan|quy|nam|hom nay|hom qua|tu ngay|den ngay)\b', normalized
-        ):
-            names = ['get_invoice_overview', 'get_monthly_summary']
-            if intent[0] == 'overview':
-                names.append('get_supplier_summary')
-            preset_calls = [{'id': f'aihook_intent_{index}', 'type': 'function',
-                             'function': {'name': name, 'arguments': '{}'}} for index, name in enumerate(names)]
-    first_message = ({'content': '', 'tool_calls': preset_calls}
-                     if preset_calls else _call_model(messages, include_tools=True))
+    first_message = _call_model(messages, include_tools=True)
     tool_calls = first_message.get('tool_calls') or []
     if not isinstance(tool_calls, list):
         tool_calls = []
@@ -567,12 +514,11 @@ def run_ai_agent(
         if fallback:
             tool_calls = fallback
         else:
-            content = first_message.get('content')
-            answer = content.strip() if isinstance(content, str) else ''
+            answer = 'Bạn muốn tra cứu hóa đơn, xếp hạng đối tác, kiểm tra dữ liệu hay so sánh khoảng thời gian nào? Mình cần truy vấn phù hợp trước khi nhận xét dữ liệu.'
             if _looks_like_invoice_question(question):
                 answer = 'Mình chưa truy vấn được dữ liệu hóa đơn cho câu hỏi này. Hãy thử diễn đạt rõ nhà cung cấp, mã hóa đơn hoặc khoảng thời gian cần phân tích.'
             return {
-                'answer': answer or 'Mình chưa tạo được câu trả lời. Bạn hãy thử diễn đạt câu hỏi cụ thể hơn.',
+                'answer': answer,
                 'evidence': [],
                 'sources': [],
                 'validation': {'status': 'not_applicable', 'passed_checks': 0, 'total_checks': 0, 'checks': []},
@@ -596,18 +542,10 @@ def run_ai_agent(
             seen_calls.add(key)
     tool_calls = unique_calls
 
-    assistant_tool_message = {
-        'role': 'assistant',
-        'content': first_message.get('content') or '',
-        'tool_calls': tool_calls,
-    }
-    followup_messages = messages + [assistant_tool_message]
     results: list[tuple[str, dict]] = []
     evidence = []
-    tool_messages = []
 
     for index, call in enumerate(tool_calls):
-        call_id = call.get('id') or f'aihook_tool_{index + 1}'
         function = call.get('function') or {}
         name = function.get('name')
         if index >= MAX_TOOL_CALLS:
@@ -635,13 +573,6 @@ def run_ai_agent(
             item = _evidence_for_tool(str(name), result)
             if item:
                 evidence.append(item)
-        tool_messages.append({
-            'role': 'tool',
-            'tool_call_id': call_id,
-            'content': json.dumps(result, ensure_ascii=False, default=str),
-        })
-
-    followup_messages.extend(tool_messages)
     has_successful_result = any('error' not in result for _, result in results)
     observations = build_observations(results, question=question) if has_successful_result else []
     focused_answers = [focused_response(name, result)[0] for name, result in results
@@ -649,43 +580,17 @@ def run_ai_agent(
     if focused_answers:
         observations = list(dict.fromkeys(focused_answers)) + observations
     recommendations = build_recommendations(question, results) if has_successful_result else []
-    qualitative = ''
-    if has_successful_result and not preset_calls:
-        # Ask for *actual interpretation*, not a generic acknowledgement.
-        followup_messages.append({
-            'role': 'user',
-            'content': (
-                'Trả lời đúng câu hỏi ban đầu từ kết quả công cụ, ngắn gọn và không lặp ý. '
-                'Chỉ nêu giới hạn dữ liệu ảnh hưởng trực tiếp đến câu trả lời. '
-                'Không thêm phân tích kinh doanh hoặc khuyến nghị nếu người dùng không yêu cầu. '
-                'Không chép lại số liệu, không đưa ra số mới, không khẳng định nguyên nhân chưa được dữ liệu chứng minh; '
-                'không trả lời chung chung rằng đã truy vấn dữ liệu.'
-            ),
-        })
-        try:
-            final_message = _call_model(followup_messages, include_tools=False)
-            raw_answer = final_message.get('content')
-            qualitative = _strip_numeric_claims(raw_answer) if isinstance(raw_answer, str) else ''
-        except HTTPException as exc:
-            # Keep verified findings usable when the local LLM runs out of time
-            # during wording generation; tool data was already computed safely.
-            logger.warning('Synthesis unavailable after successful tool calls (HTTP %s)', exc.status_code)
-
     if not has_successful_result:
         errors = [item.get('error') for _, item in results if item.get('error')]
         answer = ('Không thể truy vấn dữ liệu cho câu hỏi này: ' + '; '.join(errors[:2])) if errors else 'Không tìm thấy dữ liệu hóa đơn phù hợp.'
     elif observations:
         # Crucial: factual findings always come from the backend, never from model prose.
-        answer = 'Nhận xét dựa trên dữ liệu đã kiểm chứng:\n' + '\n'.join(f'• {item}' for item in observations)
+        answer = 'Kết quả từ công cụ truy vấn:\n' + '\n'.join(f'• {item}' for item in observations)
     else:
         answer = 'Chưa có dữ liệu đủ cụ thể để đưa ra nhận xét về câu hỏi này.'
 
     if recommendations:
         answer += '\n\nKhuyến nghị quản lý:\n' + '\n'.join(f'• {item}' for item in recommendations)
-    if qualitative and observations and len(qualitative) >= 45:
-        answer += '\n\nGợi ý bổ sung từ AI (cần đối chiếu với thực tế):\n' + qualitative
-    elif qualitative and not observations:
-        answer = qualitative
 
     validation = _collect_validation(results)
     if validation['status'] == 'warning':
@@ -734,7 +639,8 @@ def chat(payload: ChatRequest, db: Session = Depends(get_db),
     if payload.use_ai:
         if not configured():
             raise HTTPException(503, 'Chưa cấu hình AIHOOK_AI_KEY và AIHOOK_AI_MODEL trên backend. Hỏi đáp nội bộ vẫn sử dụng được.')
-        result = run_ai_agent(payload.message, db, business_id, payload.start_date, payload.end_date)
+        result = run_ai_agent(payload.message, db, business_id, payload.start_date, payload.end_date,
+                              payload.context.model_dump(mode='json') if payload.context else None)
         return {
             'answer': result['answer'],
             'mode': 'ai',
@@ -742,7 +648,11 @@ def chat(payload: ChatRequest, db: Session = Depends(get_db),
             'sources': result['sources'],
             'source_note': 'Các hóa đơn này được truy xuất trực tiếp từ database theo công cụ AI đã gọi; không phải danh sách mẫu cố định.',
             'overview': overview,
-            'validation': result['validation'] if result['validation']['status'] != 'not_applicable' else validation,
+            'validation': result['validation'],
+            'intent': result.get('intent', 'open_question'),
+            'context': result.get('context'),
+            'assurance': result.get('assurance', {'verified': False, 'intent': 'not_evaluated',
+                                                'data': 'not_evaluated', 'numerical': result['validation']['status']}),
             'evidence': result['evidence'],
             'tools_used': result['tools_used'],
         }

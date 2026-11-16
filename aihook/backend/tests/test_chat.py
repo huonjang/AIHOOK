@@ -48,13 +48,13 @@ def test_explicit_question_dates_are_preserved():
 
 @pytest.mark.parametrize('question,expected', [
     ('Phân tích tổng quan các hóa đơn đã xác nhận. Nêu xu hướng, điểm đáng chú ý và giới hạn dữ liệu.',
-     ['get_invoice_overview', 'get_monthly_summary', 'get_supplier_summary']),
+     ['get_invoice_overview']),
     ('Nhà cung cấp nào có tổng giá trị hóa đơn lớn nhất? So sánh nhóm đứng đầu theo tổng giá trị và số lượng.',
      ['get_supplier_rankings']),
     ('Tháng nào có tổng giá trị hóa đơn cao nhất? So sánh với các tháng khác đã hoàn tất.',
-     ['get_monthly_summary']),
+     ['get_flow_monthly_summary']),
     ('Kiểm tra tính nhất quán giữa tổng tiền, trung bình, số lượng và thống kê theo tháng.',
-     ['get_invoice_overview', 'get_monthly_summary']),
+     ['get_invoice_overview']),
     ('Đưa ra 5 khuyến nghị giúp tôi quản lý dữ liệu hóa đơn tốt hơn, dựa trên dữ liệu đã ghi nhận.',
      ['get_invoice_recommendations']),
 ])
@@ -262,11 +262,10 @@ def test_ai_function_calling_returns_backend_verified_evidence(client, monkeypat
     assert '350.00 VND' not in data['answer']
     assert '350 đ' in data['answer']
     assert 'An Phat' in data['answer']
-    assert 'Nhận xét dựa trên dữ liệu đã kiểm chứng' in data['answer']
-    assert len(captured) == 2
+    assert 'Kết quả từ công cụ truy vấn' in data['answer']
+    assert len(captured) == 1
     assert 'tools' in captured[0]
     assert 'tool_choice' not in captured[0]  # Not supported by all Ollama OpenAI-compatible versions.
-    assert 'tools' not in captured[1]
     assert 'invoice_samples' not in json.dumps(captured[0]['messages'], ensure_ascii=False)
     assert 'raw_text' not in json.dumps(captured, ensure_ascii=False)
     assert api.get('/api/invoices').json() == before

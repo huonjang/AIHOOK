@@ -4,6 +4,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.models import Invoice
+from app.services.partner_identity import partner_identity
 
 
 def money(value):
@@ -24,9 +25,11 @@ def get_analytics(db: Session, business_id: int, start: date | None, end: date |
     flow_types = ('purchase', 'sale', 'unknown')
     flows = {name: {'count': 0, 'amount': Decimal('0')} for name in flow_types}
     flows_by_month = {}
+    flow_counts_by_month = {}
     monthly = {}
     suppliers = {}
     customers = {}
+    unidentified = {role: {'count': 0, 'amount': Decimal('0')} for role in ('purchase', 'sale')}
     undated_count = 0
     undated_total = Decimal('0')
     for invoice in invoices:
@@ -42,15 +45,20 @@ def get_analytics(db: Session, business_id: int, start: date | None, end: date |
             item['amount'] += value
             month_flows = flows_by_month.setdefault(month, {key: Decimal('0') for key in flow_types})
             month_flows[flow_type] += value
+            month_counts = flow_counts_by_month.setdefault(month, {key: 0 for key in flow_types})
+            month_counts[flow_type] += 1
         else:
             undated_count += 1
             undated_total += value
         if flow_type == 'unknown':
             continue
         is_purchase = flow_type == 'purchase'
-        name = ' '.join(((invoice.seller_name if is_purchase else invoice.buyer_name) or '').split()) or 'Chưa rõ đối tác'
-        tax = ((invoice.seller_tax_code if is_purchase else invoice.buyer_tax_code) or '').strip() or None
-        key = ('tax', tax) if tax else ('name', name.casefold())
+        identity = partner_identity(invoice)
+        if identity is None:
+            unidentified[flow_type]['count'] += 1
+            unidentified[flow_type]['amount'] += value
+            continue
+        key, name, tax = identity
         groups = suppliers if is_purchase else customers
         supplier = groups.setdefault(key, {'name': name, 'tax_code': tax, 'count': 0, 'amount': Decimal('0')})
         supplier['count'] += 1
@@ -78,9 +86,12 @@ def get_analytics(db: Session, business_id: int, start: date | None, end: date |
                        'invoice_count': s['count'], 'total_amount': money(s['amount'])} for s in ranked],
         'customers': [{'buyer_name': s['name'], 'buyer_tax_code': s['tax_code'],
                        'invoice_count': s['count'], 'total_amount': money(s['amount'])} for s in ranked_customers],
+        'unidentified_partners': {role: {'invoice_count': item['count'], 'total_amount': money(item['amount'])}
+                                  for role, item in unidentified.items()},
         'flow_summary': {name: {'invoice_count': item['count'], 'total_amount': money(item['amount'])}
                          for name, item in flows.items()},
         'flow_monthly': [{'month': month, **{name + '_amount': money(flows_by_month.get(month, {}).get(name, Decimal('0')))
-                                                for name in flow_types}}
+                                                for name in flow_types},
+                         **{name + '_count': flow_counts_by_month.get(month, {}).get(name, 0) for name in flow_types}}
                          for month in sorted(monthly)],
     }

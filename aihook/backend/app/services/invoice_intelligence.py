@@ -10,6 +10,7 @@ from app.models import Invoice
 from app.ocr_service import normalize_text
 from app.services.analytics_service import get_analytics, money
 from app.services.numerical_validation import validate_analytics
+from app.services.partner_identity import clean_identity, partner_identity
 
 
 def recognize_intent(question):
@@ -59,12 +60,25 @@ def partner_rankings(db, business_id, start, end, role='supplier', limit=5):
     data = get_analytics(db, business_id, start, end)
     key, name = ('suppliers', 'seller_name') if role == 'supplier' else ('customers', 'buyer_name')
     rows = data[key]
-    total = sum((Decimal(row['total_amount']) for row in rows), Decimal('0'))
-    count = sum(row['invoice_count'] for row in rows)
+    direction = 'purchase' if role == 'supplier' else 'sale'
+    total = Decimal(data['flow_summary'][direction]['total_amount'])
+    count = data['flow_summary'][direction]['invoice_count']
     by_amount = sorted(rows, key=lambda row: (-Decimal(row['total_amount']), -row['invoice_count'], row[name]))
     by_count = sorted(rows, key=lambda row: (-row['invoice_count'], -Decimal(row['total_amount']), row[name]))
     top_total = sum((Decimal(row['total_amount']) for row in by_amount[:limit]), Decimal('0'))
+    for row in rows:
+        row['share_percent'] = money(Decimal(row['total_amount']) / total * 100) if total else None
+    tax_field = 'seller_tax_code' if role == 'supplier' else 'buyer_tax_code'
+    identity = lambda row: ('tax', row[tax_field]) if row[tax_field] else ('name', row[name].casefold())
+    count_keys = {identity(row) for row in by_count[:limit]}
+    common = [row for row in by_amount[:limit] if identity(row) in count_keys]
     return {'role': role, 'limit': limit, 'by_amount': by_amount[:limit], 'by_count': by_count[:limit],
+            'top_by_amount': by_amount[:limit], 'top_by_count': by_count[:limit],
+            'common_partners': common, 'common_suppliers': common if role == 'supplier' else [],
+            'common_customers': common if role == 'customer' else [],
+            'purchase_total': money(total) if role == 'supplier' else None,
+            'top_5_concentration': str(sum((Decimal(row['total_amount']) for row in by_amount[:5]), Decimal('0')) / total) if total else None,
+            'unidentified': data['unidentified_partners'][direction],
             'total_amount': money(total), 'invoice_count': count, 'partner_count': len(rows),
             'top_share_percent': money(top_total / total * 100) if total else None,
             'unknown_count': data['flow_summary']['unknown']['invoice_count'],
@@ -76,7 +90,8 @@ def invoice_extremes(db, business_id, start, end, mode='both'):
     dated = sorted((row for row in rows if row.invoice_date), key=lambda row: (row.invoice_date, row.id))
 
     def record(row):
-        partner = row.seller_name if row.flow_type == 'purchase' else row.buyer_name if row.flow_type == 'sale' else None
+        identity = partner_identity(row)
+        partner = identity[1] if identity else None
         return {'invoice_id': row.id, 'invoice_number': row.invoice_number,
                 'invoice_date': row.invoice_date.isoformat(), 'partner': partner,
                 'seller_name': row.seller_name, 'buyer_name': row.buyer_name,
@@ -130,6 +145,8 @@ def recommendations(db, business_id, start, end, count=5):
     unknown = len(rows) - len(purchase) - len(sale)
     missing = sum(not row.invoice_date or not row.invoice_number or row.total_amount is None for row in rows)
     missing_tax = sum(not row.seller_tax_code for row in purchase)
+    missing_buyer = sum(clean_identity(row.buyer_name) is None for row in rows)
+    missing_seller = sum(clean_identity(row.seller_name) is None for row in rows)
     ranks = partner_rankings(db, business_id, start, end)
     head = ranks['by_amount'][0] if ranks['by_amount'] else None
     frequent = ranks['by_count'][0] if ranks['by_count'] else None
@@ -141,7 +158,7 @@ def recommendations(db, business_id, start, end, count=5):
         f'Chuẩn hóa tên và mã số thuế nhà cung cấp: có {len(purchase)} hóa đơn mua vào, trong đó {missing_tax} hóa đơn thiếu mã số thuế người bán; dùng mã số thuế để tránh tách sai nhóm.',
         f'Theo dõi nhóm mua vào theo giá trị: {value_reason}; đối chiếu file nguồn trước khi lập báo cáo.',
         f'Đối chiếu đồng thời số lượng và giá trị theo nhà cung cấp: {frequency_reason}; xem cả hai tiêu chí trước khi kết luận nhóm có tần suất cao nhưng giá trị nhỏ.',
-        f'Rà soát trường dữ liệu và OCR: {missing}/{len(rows)} hóa đơn đã xác nhận thiếu ngày, mã hóa đơn hoặc tổng tiền; trạng thái xác nhận không thay thế đối chiếu bản gốc.',
+        f'Rà soát trường dữ liệu và OCR: {missing}/{len(rows)} hóa đơn đã xác nhận thiếu ngày, mã hóa đơn hoặc tổng tiền; {missing_buyer} thiếu tên người mua, {missing_seller} thiếu tên người bán. Bổ sung thông tin còn thiếu từ bản gốc; trạng thái xác nhận không chứng minh OCR chính xác.',
         f'Đối chiếu mua vào, bán ra và thanh toán riêng: có {len(purchase)} hóa đơn mua vào, {len(sale)} bán ra và {unknown} chưa phân loại; hệ thống chưa có dữ liệu thanh toán để xác định đã thu hoặc đã trả.',
         f'Kiểm tra ngày lập trước khi tổng hợp theo kỳ: {sum(row.invoice_date is None for row in rows)} hóa đơn thiếu ngày nên không thể phân bổ theo tháng.',
         f'Rà soát mã hóa đơn trùng theo người bán: có {len(rows)} bản ghi trong phạm vi; cần đối chiếu thêm mã số thuế và file gốc trước khi xác định bản ghi trùng.',
@@ -184,14 +201,20 @@ def focused_response(name, result):
                              'columns': [label.capitalize(), 'Số hóa đơn', 'Tổng giá trị'],
                              'rows': [[row[field], row['invoice_count'], amount(row['total_amount'])] for row in result[key]]})
         if not result['by_amount']:
-            answer = f'Chưa có hóa đơn {direction} đã xác nhận trong phạm vi này để xếp hạng {label}.'
+            answer = f'Có {result["invoice_count"]} hóa đơn {direction} đã xác nhận, nhưng chưa có {label} xác định được để xếp hạng.'
         else:
             first, frequent = result['by_amount'][0], result['by_count'][0]
             same = first[field] == frequent[field] and first.get('seller_tax_code', first.get('buyer_tax_code')) == frequent.get('seller_tax_code', frequent.get('buyer_tax_code'))
-            answer = f'{first[field]} đứng đầu về giá trị ({amount(first["total_amount"])}). '
+            share = f'{first["share_percent"]}%' if first['share_percent'] is not None else 'không tính được'
+            answer = f'{first[field]} đứng đầu về giá trị ({amount(first["total_amount"])}; {first["invoice_count"]} hóa đơn; tỷ trọng {share} tổng giá trị {direction}). '
             answer += ('Cùng đơn vị này đứng đầu về số lượng' if same else f'{frequent[field]} đứng đầu về số lượng') + f' ({frequent["invoice_count"]} hóa đơn).'
             if result['top_share_percent'] is not None:
                 answer += f' Nhóm {len(result["by_amount"])} đơn vị đầu bảng chiếm {result["top_share_percent"]}% tổng giá trị {direction} trong phạm vi này.'
+            answer += (' Xuất hiện trong cả hai nhóm: ' + ', '.join(row[field] for row in result['common_partners']) + '.'
+                       if result['common_partners'] else ' Không có đối tác xuất hiện trong cả hai nhóm Top được chọn.')
+        missing = result['unidentified']
+        answer += (f' Xác định được {result["partner_count"]} {label}; {missing["invoice_count"]} hóa đơn chưa xác định đối tác, '
+                   f'tổng giá trị {amount(missing["total_amount"])}; các bản ghi này không được gom thành một đối tác.')
         if result['unknown_count']:
             answer += f' Có {result["unknown_count"]} hóa đơn chưa phân loại được loại khỏi xếp hạng.'
         return answer, evidence
@@ -202,7 +225,7 @@ def focused_response(name, result):
         fields = [('Ngày lập', 'invoice_date'), ('Mã hóa đơn', 'invoice_number'), ('Đối tác', 'partner'), ('Tổng giá trị', 'total_amount')]
         evidence = [{'title': 'Ngày lập hóa đơn', 'columns': ['Thông tin'] + [label for label, _ in selected],
                      'rows': [[label] + [amount(row[key]) if key == 'total_amount' else row[key] or 'Chưa xác định' for _, row in selected] for label, key in fields]}]
-        answer = ' '.join(f'Hóa đơn {label.lower()}: {row["invoice_number"] or "ID " + str(row["invoice_id"])} ngày {row["invoice_date"]}, tổng giá trị {amount(row["total_amount"])}.' for label, row in selected)
+        answer = ' '.join(f'Hóa đơn {label.lower()}: {row["invoice_number"] or "ID " + str(row["invoice_id"])} ngày {row["invoice_date"]}, đối tác: {row["partner"] or "chưa xác định (thiếu định danh theo hướng hóa đơn)"}, tổng giá trị {amount(row["total_amount"])}.' for label, row in selected)
         if result['days_between'] is not None:
             answer += f' Khoảng cách ngày lập: {result["days_between"]} ngày.'
         answer += f' {result["undated_count"]} hóa đơn thiếu ngày không được xét. Cùng ngày chọn ID nhỏ nhất.'

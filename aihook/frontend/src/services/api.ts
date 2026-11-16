@@ -125,6 +125,17 @@ export interface ChatValidation {
   checks: { code: string; label: string; passed: boolean; expected?: string; actual?: string }[]
 }
 
+export interface ConversationContext {
+  topic: string
+  role: 'supplier' | 'customer'
+  criterion: 'amount' | 'count'
+  limit: number
+  query_start?: string | null
+  query_end?: string | null
+  scope_start?: string | null
+  scope_end?: string | null
+}
+
 export interface ChatReply {
   answer: string
   mode: string
@@ -141,6 +152,9 @@ export interface ChatReply {
   evidence?: ChatEvidence[]
   validation?: ChatValidation
   tools_used?: string[]
+  context?: ConversationContext | null
+  intent?: string
+  assurance?: { verified: boolean; intent: string; data: string; numerical: string }
 }
 
 export const accountApi = {
@@ -155,9 +169,9 @@ export const accountApi = {
 
 export const api = {
   getChatStatus: () => request<{ ai_configured: boolean; function_calling?: boolean }>('/api/chat/status'),
-  askQuestion: (message: string, start: string, end: string, useAI: boolean) => request<ChatReply>('/api/chat', {
+  askQuestion: (message: string, start: string, end: string, useAI: boolean, context?: ConversationContext | null) => request<ChatReply>('/api/chat', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, start_date: start || null, end_date: end || null, use_ai: useAI }),
+    body: JSON.stringify({ message, start_date: start || null, end_date: end || null, use_ai: useAI, context }),
   }),
   getAnalytics: (start = '', end = '', signal?: AbortSignal) => {
     const params = new URLSearchParams()

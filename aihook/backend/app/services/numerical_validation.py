@@ -33,6 +33,9 @@ def validate_analytics(data: dict[str, Any]) -> dict[str, Any]:
     supplier_count = sum(int(row.get("invoice_count", 0)) for row in suppliers)
     supplier_group_count = len(suppliers)
     supplier_total = sum((_decimal(row.get("total_amount")) for row in suppliers), Decimal("0"))
+    unidentified = data.get('unidentified_partners', {})
+    supplier_count += unidentified.get('purchase', {}).get('invoice_count', 0)
+    supplier_total += _decimal(unidentified.get('purchase', {}).get('total_amount'))
     purchase = data.get('flow_summary', {}).get('purchase', overview)
     purchase_count = int(purchase.get('invoice_count', 0))
     purchase_total = _decimal(purchase.get('total_amount'))
@@ -90,8 +93,8 @@ def validate_analytics(data: dict[str, Any]) -> dict[str, Any]:
     if 'customers' in data:
         sale = data.get('flow_summary', {}).get('sale', {})
         for suffix, actual, expected, label in [
-            ('count', sum(row['invoice_count'] for row in data['customers']), sale.get('invoice_count', 0), 'Số hóa đơn khách hàng khớp hóa đơn bán ra'),
-            ('total', sum((_decimal(row['total_amount']) for row in data['customers']), Decimal('0')), _decimal(sale.get('total_amount')), 'Tổng tiền khách hàng khớp tổng bán ra'),
+            ('count', sum(row['invoice_count'] for row in data['customers']) + unidentified.get('sale', {}).get('invoice_count', 0), sale.get('invoice_count', 0), 'Số hóa đơn khách hàng xác định và chưa xác định khớp hóa đơn bán ra'),
+            ('total', sum((_decimal(row['total_amount']) for row in data['customers']), Decimal('0')) + _decimal(unidentified.get('sale', {}).get('total_amount')), _decimal(sale.get('total_amount')), 'Tổng tiền khách hàng xác định và chưa xác định khớp tổng bán ra'),
         ]:
             checks.append({'code': f'customer_{suffix}_reconciles', 'label': label,
                            'passed': actual == expected, 'expected': str(expected), 'actual': str(actual)})

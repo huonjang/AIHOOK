@@ -182,4 +182,4 @@ def test_explicit_month_comparison_routes_without_model(client, monkeypatch):
     monkeypatch.setattr(chat, '_call_model', no_model)
     body = api.post('/api/chat', json={'message': 'So sánh tháng 1/2026 với tháng 2/2026', 'use_ai': True}).json()
     assert body['tools_used'] == ['compare_periods']
-    assert len(body['evidence']) == 1
+    assert len(body['evidence']) == 2  # Separate role-aware tables for A and B.

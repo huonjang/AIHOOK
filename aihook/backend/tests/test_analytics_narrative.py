@@ -154,10 +154,10 @@ def test_ai_returns_qualitative_facts_even_if_model_only_acknowledges(client, mo
     })
     assert response.status_code == 200
     body = response.json()
-    assert calls == [True, False]
+    assert calls == [True]  # No second ungrounded model narrative.
     assert body['tools_used'] == ['get_invoice_overview', 'get_monthly_summary', 'get_supplier_summary']
     assert body['validation']['status'] == 'passed'
-    assert 'Nhận xét dựa trên dữ liệu đã kiểm chứng' in body['answer']
+    assert 'Kết quả từ công cụ truy vấn' in body['answer']
     assert '1.200 đ' in body['answer']
     assert 'Binh Minh' in body['answer']
     assert 'tháng 10/2026' in body['answer']

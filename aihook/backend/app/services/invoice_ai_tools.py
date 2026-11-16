@@ -68,6 +68,10 @@ class WindowArgs(RangeArgs):
     latest_months: int = Field(default=3, ge=1, le=24)
 
 
+class EngineQueryArgs(RangeArgs):
+    limit: int = Field(default=5, ge=1, le=50)
+
+
 class SearchInvoicesArgs(RangeArgs):
     invoice_number: str | None = Field(default=None, max_length=100)
     seller_name: str | None = Field(default=None, max_length=255)
@@ -203,6 +207,12 @@ for _name, _description, _schema in [
     ('get_invoice_date_extremes', 'Tìm hóa đơn có ngày lập sớm nhất, gần nhất hoặc cả hai và khoảng cách ngày.', ExtremesArgs),
     ('get_invoice_recommendations', 'Khuyến nghị quản lý dữ liệu hóa đơn theo số lượng được yêu cầu.', RecommendationArgs),
     ('compare_invoice_data_windows', 'So sánh các tháng sớm nhất và gần nhất dựa trên ngày hóa đơn thực tế, không tự đoán tháng không có dữ liệu.', WindowArgs),
+    ('get_invoice_data_quality', 'Đo số trường thực sự thiếu trong database; không suy từ trường không được trả về.', EngineQueryArgs),
+    ('detect_invoice_duplicates', 'Tìm nghi trùng theo đối tác, hướng, mã, ngày và giá trị. Không tự xác nhận trùng thực sự.', EngineQueryArgs),
+    ('detect_invoice_anomalies', 'Trung bình, trung vị và MAD theo cùng đối tác và hướng. Yêu cầu tối thiểu 5 mẫu mỗi nhóm.', EngineQueryArgs),
+    ('get_flow_monthly_summary', 'Tổng hợp từng tháng riêng mua vào, bán ra, chưa phân loại.', EngineQueryArgs),
+    ('get_flow_averages', 'Trung bình hóa đơn riêng cho mua vào và bán ra.', EngineQueryArgs),
+    ('get_top_invoices', 'Danh sách Top hóa đơn đầy đủ ngày, mã, đối tác và hướng giao dịch.', EngineQueryArgs),
 ]:
     INVOICE_TOOLS.append({'type': 'function', 'function': {
         'name': _name, 'description': _description, 'parameters': _schema.model_json_schema()}})
@@ -289,6 +299,12 @@ def execute_invoice_tool(
         return {"error": "Tham số công cụ phải là một object JSON."}
 
     try:
+        if name in {'get_invoice_data_quality', 'detect_invoice_duplicates', 'detect_invoice_anomalies',
+                    'get_flow_monthly_summary', 'get_flow_averages', 'get_top_invoices'}:
+            from app.services.intelligence_engine import execute_engine_tool
+            args = EngineQueryArgs.model_validate(arguments)
+            start, end = _intersect_range(args.start_date, args.end_date, scope_start, scope_end)
+            return execute_engine_tool(name, args.model_dump(), db, business_id, start, end)
         schemas = {'get_supplier_rankings': RankingArgs, 'get_customer_rankings': RankingArgs,
                    'get_invoice_date_extremes': ExtremesArgs, 'get_invoice_recommendations': RecommendationArgs,
                    'compare_invoice_data_windows': WindowArgs}
