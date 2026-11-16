@@ -1,3 +1,4 @@
+import { useAuth } from '../auth/AuthContext'
 import { NavLink, Outlet } from 'react-router-dom'
 import { LayoutDashboard, FileText, Sparkles, ScanLine, ShieldCheck, UserRound } from 'lucide-react'
 
@@ -8,6 +9,7 @@ const navigation = [
 ]
 
 export default function MainLayout() {
+  const { profile, signOut } = useAuth()
   return <div className="app-shell md:flex">
     <aside className="relative z-10 w-full shrink-0 border-b border-[#273955] bg-[#0b1527]/95 md:fixed md:inset-y-0 md:w-[246px] md:border-b-0 md:border-r md:overflow-y-auto">
       <div className="flex items-center gap-3 px-5 pt-6 pb-5 md:pb-9">
@@ -28,8 +30,10 @@ export default function MainLayout() {
       <div className="mt-auto hidden px-5 pt-8 pb-6 md:block md:absolute md:right-0 md:bottom-0 md:left-0">
         <div className="border-t border-[#263953] pt-5">
           <div className="flex items-center gap-2.5 text-xs text-[#91a8c3]"><ShieldCheck size={16} className="text-[#4ee0ae]"/><span>Số liệu được đối chiếu nội bộ</span></div>
-          <div className="mt-4 flex items-center gap-2 rounded-xl border border-[#263953] bg-[#111e32] px-3 py-3 text-xs text-[#7391ae]" title="Quản lý tài khoản sẽ được bổ sung sau">
-            <UserRound size={16}/> Tài khoản <span className="ml-auto text-[10px]">Sắp có</span>
+          <div className="mt-4 rounded-xl border border-[#263953] bg-[#111e32] px-3 py-3 text-xs text-[#b5cde0]">
+            <div className="flex items-center gap-2"><UserRound size={16} className="text-[#6bdef5]"/><span className="truncate font-semibold">{profile?.business.name}</span></div>
+            <p className="mt-1 truncate text-[#8ca7c1]">{profile?.owner_name} · {profile?.email}</p>
+            <div className="mt-3 flex gap-3"><NavLink to="/account" className="text-[#65dff2] hover:underline">Tài khoản</NavLink><button onClick={() => void signOut()} className="text-[#ffbdc6] hover:underline">Đăng xuất</button></div>
           </div>
         </div>
       </div>

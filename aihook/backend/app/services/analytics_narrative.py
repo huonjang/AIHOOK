@@ -35,6 +35,7 @@ def build_observations(
     results: list[tuple[str, dict]],
     *,
     today: date | None = None,
+    question: str = '',
 ) -> list[str]:
     """Return a few verified, question-relevant insights without hallucinating.
 
@@ -44,6 +45,18 @@ def build_observations(
     today = today or date.today()
     observations: list[str] = []
     seen: set[str] = set()
+    text = question.casefold()
+    business_question = any(term in text for term in ('kinh doanh', 'doanh thu', 'chi phí', 'lợi nhuận'))
+    if any(term in text for term in ('tính nhất quán', 'tinh nhat quan', 'kiểm chứng số liệu', 'kiem chung so lieu')):
+        checks = {}
+        for _, result in results:
+            for check in result.get('validation', {}).get('checks', []):
+                checks[check['code']] = check
+        if checks:
+            passed = sum(bool(check['passed']) for check in checks.values())
+            return [f'Đối chiếu số học: {passed}/{len(checks)} phép kiểm tra khớp.'] + [
+                f'Chưa khớp: {check["label"]}.' for check in checks.values() if not check['passed']
+            ]
 
     def add(message: str) -> None:
         if message and message not in seen:
@@ -65,6 +78,22 @@ def build_observations(
                     add(f'Có {missing} hóa đơn thiếu ngày lập; chúng không được phân bổ vào thống kê theo tháng và cần được kiểm tra lại.')
                 else:
                     add('Các hóa đơn trong phạm vi này đều có ngày lập, nên có thể đối chiếu đầy đủ với thống kê theo tháng.')
+
+
+            flow = result.get('flow_summary')
+            if flow and n:
+                purchases = flow.get('purchase', {})
+                sales = flow.get('sale', {})
+                unknown = flow.get('unknown', {})
+                add(
+                    f'Hướng hóa đơn đã xác nhận: mua vào {purchases.get("invoice_count", 0)} hóa đơn ({_vnd(purchases.get("total_amount", "0"))}), '
+                    f'bán ra {sales.get("invoice_count", 0)} hóa đơn ({_vnd(sales.get("total_amount", "0"))}); '
+                    f'chưa phân loại {unknown.get("invoice_count", 0)} hóa đơn ({_vnd(unknown.get("total_amount", "0"))}).'
+                )
+                if int(unknown.get('invoice_count', 0)):
+                    add('Các hóa đơn chưa phân loại cần chủ doanh nghiệp xác nhận trước khi so sánh giá trị mua vào và bán ra.')
+                if business_question:
+                    add('Giá trị mua vào hoặc bán ra không đồng nghĩa khoản tiền đã thanh toán hay đã thu; chưa thể kết luận doanh thu, chi phí hoặc lợi nhuận.')
 
         elif name == 'get_monthly_summary':
             rows = [r for r in result.get('monthly', []) if int(r['invoice_count']) > 0]
@@ -100,7 +129,7 @@ def build_observations(
                 if len(rows) >= 3:
                     total = _amount(result['total_amount'])
                     top3_total = sum((_amount(r['total_amount']) for r in rows[:3]), Decimal('0'))
-                    add(f'Ba nhà cung cấp có tổng giá trị lớn nhất chiếm {_pct(top3_total, total)} tổng giá trị hóa đơn; đây là tỷ trọng giao dịch, chưa đủ để đánh giá chất lượng hay rủi ro nhà cung cấp.')
+                    add(f'Ba đơn vị bán có tổng giá trị lớn nhất chiếm {_pct(top3_total, total)} tổng giá trị hóa đơn.')
                 frequent = max(rows, key=lambda r: (int(r['invoice_count']), _amount(r['total_amount'])))
                 if frequent['seller_name'] != head['seller_name']:
                     add(f'{frequent["seller_name"]} xuất hiện nhiều nhất trong danh sách được trả về ({frequent["invoice_count"]} hóa đơn), nhưng không đứng đầu về tổng giá trị. Tần suất và giá trị là hai tiêu chí khác nhau.')
@@ -122,7 +151,8 @@ def build_observations(
                 avg_a, avg_b = _amount(a['average_amount']), _amount(b['average_amount'])
                 if avg_a != avg_b:
                     add(f'Giá trị trung bình mỗi hóa đơn ở giai đoạn B {"cao hơn" if avg_b > avg_a else "thấp hơn"} giai đoạn A ({_vnd(avg_b)} so với {_vnd(avg_a)}).')
-            add('Chênh lệch giá trị hóa đơn không đồng nghĩa doanh thu, chi phí hay lợi nhuận thay đổi khi chưa phân loại hóa đơn đầu vào/đầu ra.')
+            if business_question:
+                add('Chênh lệch giá trị hóa đơn chưa đủ để kết luận thay đổi về hiệu quả kinh doanh.')
 
         elif name == 'get_invoice_details':
             if not result.get('found'):
@@ -164,15 +194,15 @@ def build_recommendations(question: str, results: list[tuple[str, dict]], *, max
     names = {name for name, res in results if 'error' not in res}
     suggestions: list[str] = []
     if 'get_supplier_summary' in names:
-        suggestions.append('Đối chiếu điều khoản, đơn giá và chất lượng thực tế với các nhà cung cấp có giá trị giao dịch lớn trước khi điều chỉnh mức độ hợp tác.')
-        suggestions.append('Theo dõi riêng tỷ trọng giao dịch và số hóa đơn theo từng nhà cung cấp để tránh đánh đồng giá trị với tần suất.')
+        suggestions.append('Chuẩn hóa tên và mã số thuế nhà cung cấp để tránh tách cùng một đơn vị thành nhiều nhóm.')
+        suggestions.append('Đối chiếu mã hóa đơn và file nguồn khi rà soát các bản ghi cùng người bán.')
     if 'get_monthly_summary' in names or 'compare_periods' in names:
         suggestions.append('So sánh theo các tháng đã hoàn tất; ghi chú kỳ chưa kết thúc để tránh kết luận sai về xu hướng.')
     if 'get_invoice_overview' in names:
         suggestions.append('Duy trì bước xác nhận thông tin OCR và đối chiếu hóa đơn gốc trước khi dùng số liệu làm báo cáo.')
     if 'get_invoice_details' in names or 'search_invoices' in names:
         suggestions.append('Mở file nguồn và bổ sung dữ liệu chưa có nếu cần kiểm tra thuế, sản phẩm hoặc điều kiện thanh toán.')
-    suggestions.append('Phân biệt hóa đơn mua vào và bán ra trước khi đánh giá doanh thu, chi phí hay lợi nhuận.')
+    suggestions.append('Kiểm tra phân loại mua vào, bán ra và các hóa đơn chưa phân loại.')
     suggestions.append('Rà soát hóa đơn trùng, thông tin thiếu và giao dịch giá trị bất thường bằng các quy tắc kiểm soát độc lập.')
     # Avoid padding unrelated advice. If asked explicitly for five recommendations, provide five relevant ones.
     return list(dict.fromkeys(suggestions))[:max_items]

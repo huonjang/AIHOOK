@@ -29,6 +29,22 @@ def client(tmp_path, monkeypatch):
 
     main.app.dependency_overrides[get_db] = override_db
     with TestClient(main.app) as test_client:
+        from datetime import datetime, timedelta, timezone
+        from fastapi import Response
+        from http.cookies import SimpleCookie
+        from app.models import User
+        from app.security import COOKIE, create_login_session, hash_password
+        with sessions() as db:
+            user = User(business_id=1, email='fixture@example.com',
+                        password_hash=hash_password('test-password-2026'), owner_name='Fixture Owner')
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            resp = Response()
+            create_login_session(db, resp, user)
+            parsed = SimpleCookie()
+            parsed.load(resp.headers['set-cookie'])
+            test_client.cookies.set(COOKIE, parsed[COOKIE].value, path='/api')
         yield test_client, sessions, uploads, monkeypatch
     main.app.dependency_overrides.clear()
     engine.dispose()

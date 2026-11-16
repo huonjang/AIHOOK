@@ -3,6 +3,106 @@ from decimal import Decimal
 from datetime import date
 from app.models import Invoice
 from app.routers import chat
+import pytest
+
+
+@pytest.mark.parametrize('question,name,arguments', [
+    ('Cho xem tổng quan hóa đơn nhé', 'get_invoice_overview',
+     {'start_date': '2026-11-01', 'end_date': '2026-11-30'}),
+    ('Cho xem nhà cung cấp đứng đầu về giá trị', 'get_supplier_summary',
+     {'start_date': '2026-11-01', 'end_date': '2026-11-30',
+      'sort_by': 'total_amount', 'limit': 100}),
+])
+def test_free_question_repairs_invented_dates_and_supplier_arguments(client, monkeypatch, question, name, arguments):
+    api, sessions, _, _ = client
+    with sessions() as db:
+        db.add(Invoice(business_id=1, file_name='test.pdf', file_path='test.pdf',
+                       total_amount=Decimal('100'), invoice_date=date(2026, 8, 2),
+                       seller_name='Supplier', verification_status='confirmed', flow_type='purchase'))
+        db.commit()
+    monkeypatch.setenv('AIHOOK_AI_KEY', 'test')
+    monkeypatch.setenv('AIHOOK_AI_MODEL', 'test')
+
+    def model(messages, include_tools):
+        if include_tools:
+            return {'tool_calls': [{'id': 'test', 'type': 'function',
+                    'function': {'name': name, 'arguments': json.dumps(arguments)}}]}
+        return {'content': ''}
+
+    monkeypatch.setattr(chat, '_call_model', model)
+    data = api.post('/api/chat', json={'message': question, 'use_ai': True}).json()
+    assert '100 đ' in data['answer']
+    assert 'Tham số truy vấn không hợp lệ' not in data['answer']
+    scoped = api.post('/api/chat', json={'message': question, 'use_ai': True,
+                      'start_date': '2026-11-01', 'end_date': '2026-11-30'}).json()
+    assert scoped['overview']['invoice_count'] == 0
+    assert '100 đ' not in scoped['answer']
+
+
+def test_explicit_question_dates_are_preserved():
+    calls = [{'function': {'name': 'get_invoice_overview', 'arguments': json.dumps(
+        {'start_date': '2026-08-01', 'end_date': '2026-08-31'})}}]
+    result = chat._normalize_model_calls('Phân tích hóa đơn tháng 8/2026', calls)
+    assert json.loads(result[0]['function']['arguments'])['start_date'] == '2026-08-01'
+
+
+@pytest.mark.parametrize('question,expected', [
+    ('Phân tích tổng quan các hóa đơn đã xác nhận. Nêu xu hướng, điểm đáng chú ý và giới hạn dữ liệu.',
+     ['get_invoice_overview', 'get_monthly_summary', 'get_supplier_summary']),
+    ('Nhà cung cấp nào có tổng giá trị hóa đơn lớn nhất? So sánh nhóm đứng đầu theo tổng giá trị và số lượng.',
+     ['get_supplier_rankings']),
+    ('Tháng nào có tổng giá trị hóa đơn cao nhất? So sánh với các tháng khác đã hoàn tất.',
+     ['get_monthly_summary']),
+    ('Kiểm tra tính nhất quán giữa tổng tiền, trung bình, số lượng và thống kê theo tháng.',
+     ['get_invoice_overview', 'get_monthly_summary']),
+    ('Đưa ra 5 khuyến nghị giúp tôi quản lý dữ liệu hóa đơn tốt hơn, dựa trên dữ liệu đã ghi nhận.',
+     ['get_invoice_recommendations']),
+])
+def test_preset_questions_use_scope_without_model_filters(client, monkeypatch, question, expected):
+    api, sessions, _, _ = client
+    with sessions() as db:
+        db.add(Invoice(business_id=1, file_name='test.pdf', file_path='test.pdf',
+                       total_amount=Decimal('100'), invoice_date=date(2026, 8, 2),
+                       seller_name='Supplier', verification_status='confirmed', flow_type='purchase'))
+        db.commit()
+    monkeypatch.setenv('AIHOOK_AI_KEY', 'test')
+    monkeypatch.setenv('AIHOOK_AI_MODEL', 'test')
+
+    def unexpected_model(*args, **kwargs):
+        raise AssertionError('Preset queries must not depend on model arguments or prose')
+
+    monkeypatch.setattr(chat, '_call_model', unexpected_model)
+    data = api.post('/api/chat', json={'message': question, 'use_ai': True}).json()
+    assert data['tools_used'] == expected
+    assert bool(data['evidence']) == (expected != ['get_invoice_recommendations'])
+    assert 'Tham số truy vấn không hợp lệ' not in data['answer']
+    assert 'Không có hóa đơn' not in data['answer']
+    assert data['overview']['invoice_count'] == 1
+    scoped = api.post('/api/chat', json={'message': question, 'use_ai': True,
+                      'start_date': '2026-11-01', 'end_date': '2026-11-30'}).json()
+    assert scoped['overview']['invoice_count'] == 0
+
+
+def test_summary_without_model_tools_uses_authenticated_invoice_data(client, monkeypatch):
+    api, sessions, _, _ = client
+    with sessions() as db:
+        db.add(Invoice(business_id=1, file_name='test.pdf', file_path='test.pdf',
+                       total_amount=Decimal('100'), verification_status='confirmed'))
+        db.commit()
+    monkeypatch.setenv('AIHOOK_AI_KEY', 'test')
+    monkeypatch.setenv('AIHOOK_AI_MODEL', 'test')
+    messages_seen = []
+
+    def model(messages, include_tools):
+        messages_seen.append(messages)
+        return {'content': 'Không có hóa đơn trong phạm vi.'}
+
+    monkeypatch.setattr(chat, '_call_model', model)
+    data = api.post('/api/chat', json={'message': 'Tóm tắt', 'use_ai': True}).json()
+    assert 'get_invoice_overview' in data['tools_used']
+    assert data['overview']['invoice_count'] == 1
+    assert any('1 hóa đơn' in str(row) for row in [data['answer']])
+    assert messages_seen == []  # Summary intent no longer depends on model tools.
 
 
 def test_local_scope_and_no_writes(client):
@@ -46,7 +146,7 @@ def test_model_request_and_failure(client,monkeypatch):
                 def json(self):return {'choices':[{'message':{'content':'Không có hóa đơn trong phạm vi.'}}]}
             return Response()
     monkeypatch.setattr(chat.httpx,'Client',FakeClient)
-    data=api.post('/api/chat',json={'message':'Tóm tắt','use_ai':True}).json()
+    data=api.post('/api/chat',json={'message':'Giải thích dữ liệu hóa đơn','use_ai':True}).json()
     assert data['mode']=='ai'
     assert captured['json']['model']=='test-model'
     assert 'raw_text' not in captured['json']['messages'][1]['content']
@@ -74,7 +174,7 @@ def test_ai_ollama_model_not_found_error(client, monkeypatch):
             return httpx.Response(404, request=httpx.Request('POST', url))
 
     monkeypatch.setattr(chat.httpx, 'Client', FakeClient)
-    resp = api.post('/api/chat', json={'message': 'Tóm tắt', 'use_ai': True})
+    resp = api.post('/api/chat', json={'message': 'Giải thích dữ liệu hóa đơn', 'use_ai': True})
     assert resp.status_code == 502
     assert 'ollama list' in resp.json()['detail']
 
@@ -96,7 +196,7 @@ def test_ai_ollama_timeout_error(client, monkeypatch):
             raise httpx.ReadTimeout('simulated private details')
 
     monkeypatch.setattr(chat.httpx, 'Client', FakeClient)
-    resp = api.post('/api/chat', json={'message': 'Tóm tắt', 'use_ai': True})
+    resp = api.post('/api/chat', json={'message': 'Giải thích dữ liệu hóa đơn', 'use_ai': True})
     assert resp.status_code == 504
     assert 'AIHOOK_AI_TIMEOUT' in resp.json()['detail']
     assert 'private details' not in resp.text
@@ -112,7 +212,7 @@ def test_ai_function_calling_returns_backend_verified_evidence(client, monkeypat
         ]:
             db.add(Invoice(business_id=1, file_name='sample.pdf', file_path='sample.pdf',
                            invoice_number=number, seller_name=seller, total_amount=Decimal(amount),
-                           invoice_date=day, verification_status='confirmed'))
+                           invoice_date=day, verification_status='confirmed', flow_type='purchase'))
         db.commit()
 
     monkeypatch.setenv('AIHOOK_AI_KEY', 'ollama')
@@ -151,7 +251,7 @@ def test_ai_function_calling_returns_backend_verified_evidence(client, monkeypat
 
     before = api.get('/api/invoices').json()
     monkeypatch.setattr(chat.httpx, 'Client', FakeClient)
-    response = api.post('/api/chat', json={'message': 'Phân tích tổng quan hóa đơn', 'use_ai': True})
+    response = api.post('/api/chat', json={'message': 'Hãy phân tích tổng thể hóa đơn', 'use_ai': True})
     assert response.status_code == 200
     data = response.json()
     assert data['mode'] == 'ai'
@@ -191,8 +291,8 @@ def test_ai_invoice_question_without_tool_call_uses_safe_backend_fallback(client
 
     monkeypatch.setattr(chat.httpx, 'Client', FakeClient)
     data = api.post('/api/chat', json={'message': 'Nhà cung cấp nào có nhiều hóa đơn nhất?', 'use_ai': True}).json()
-    assert data['tools_used'] == ['get_supplier_summary']
-    assert data['evidence'][0]['title'] == 'Thống kê nhà cung cấp'
+    assert data['tools_used'] == ['get_supplier_rankings']
+    assert len(data['evidence']) == 2
     assert '50 hóa đơn' not in data['answer']  # model claim is removed; backend data wins
 
 

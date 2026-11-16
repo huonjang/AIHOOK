@@ -18,7 +18,7 @@ export class ApiError extends Error {
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   let response: Response
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, options)
+    response = await fetch(`${API_BASE_URL}${path}`, { ...options, credentials: 'include' })
   } catch {
     throw new Error('Không thể kết nối máy chủ. Vui lòng thử lại.')
   }
@@ -37,12 +37,26 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
         message = detail.message
       }
     }
+    if (response.status === 401 && !path.startsWith('/api/auth/')) {
+      window.dispatchEvent(new Event('aihook:unauthorized'))
+    }
     throw new ApiError(message, response.status)
   }
   return data as T
 }
 
+export type InvoiceFlow = 'purchase' | 'sale' | 'unknown'
+export interface AccountProfile {
+  id: number
+  email: string
+  owner_name: string
+  phone: string | null
+  business: { id: number; name: string; tax_code: string | null }
+}
+
 export interface Invoice {
+  flow_type?: InvoiceFlow
+  classification_source?: string
   id: number
   filename: string
   size: number
@@ -63,6 +77,7 @@ export interface InvoiceAnalysis {
   total_amount: string | null
   raw_text: string
   analyzed_at: string | null
+  flow_type?: InvoiceFlow
   verification_status: string
   ocr_fields?: {
     invoice_number: string | null
@@ -91,7 +106,10 @@ export interface AnalyticsDashboard {
   currency: string
   overview: { invoice_count: number; total_amount: string; average_amount: string; supplier_count: number; undated_count: number; undated_total_amount: string }
   monthly: { month: string; invoice_count: number; total_amount: string }[]
+  flow_summary: Record<InvoiceFlow, { invoice_count: number; total_amount: string }>
+  flow_monthly: { month: string; purchase_amount: string; sale_amount: string; unknown_amount: string }[]
   suppliers: { seller_name: string; seller_tax_code: string | null; invoice_count: number; total_amount: string }[]
+  customers: { buyer_name: string; buyer_tax_code: string | null; invoice_count: number; total_amount: string }[]
 }
 
 export interface ChatEvidence {
@@ -125,6 +143,16 @@ export interface ChatReply {
   tools_used?: string[]
 }
 
+export const accountApi = {
+  me: () => request<AccountProfile>('/api/auth/me'),
+  register: (data: { email: string; password: string; owner_name: string; business_name: string; tax_code?: string; phone?: string }) =>
+    request<AccountProfile>('/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
+  login: (data: { email: string; password: string }) =>
+    request<AccountProfile>('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
+  logout: () => request<{ message: string }>('/api/auth/logout', { method: 'POST' }),
+  updateProfile: (data: { business_name: string; owner_name: string; tax_code: string | null; phone: string | null }) => request<AccountProfile>('/api/auth/me', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
+}
+
 export const api = {
   getChatStatus: () => request<{ ai_configured: boolean; function_calling?: boolean }>('/api/chat/status'),
   askQuestion: (message: string, start: string, end: string, useAI: boolean) => request<ChatReply>('/api/chat', {
@@ -137,6 +165,7 @@ export const api = {
     if (end) params.set('end_date', end)
     return request<AnalyticsDashboard>(`/api/analytics/dashboard?${params}`, { signal })
   },
+  setInvoiceFlow: (id: number, flow_type: InvoiceFlow) => request<{ invoice_id: number; flow_type: InvoiceFlow }>(`/api/invoices/${id}/flow`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ flow_type }) }),
   getInvoices: () => request<Invoice[]>('/api/invoices'),
 
   uploadInvoice: (file: File, mode = 'single') => {
@@ -158,12 +187,11 @@ export const api = {
     request<{ message: string }>(`/api/invoices/${id}`, { method: 'DELETE' }),
 
   getInvoiceSummary: (startDate: string, endDate: string, businessId = 1) => {
-    const params = new URLSearchParams({
-      business_id: String(businessId), start_date: startDate, end_date: endDate,
-    })
+    const params = new URLSearchParams({ start_date: startDate, end_date: endDate })
+    void businessId // kept for old callers; server determines business from authenticated account
     return request<InvoiceSummary>(`/api/ai-data/summary?${params}`)
   },
 
   getInvoiceSummaryAll: (businessId = 1) =>
-    request<InvoiceSummary>(`/api/ai-data/summary?business_id=${businessId}`),
+    (void businessId, request<InvoiceSummary>('/api/ai-data/summary')),
 }

@@ -55,7 +55,7 @@ export default function DashboardPage() {
   const charts = useMemo(() => {
     if (!data) return { monthly: [], pie: [], top: [], top3: 0, peak: null as AnalyticsDashboard['monthly'][number] | null }
     const monthly = data.monthly.slice(-12).map(item => ({ ...item, amount: Number(item.total_amount), short: formatMonth(item.month) }))
-    const total = Number(data.overview.total_amount)
+    const total = Number(data.flow_summary.purchase.total_amount)
     const top = data.suppliers.slice(0, 6).map(supplier => ({
       name: supplier.seller_name, count: supplier.invoice_count, amount: Number(supplier.total_amount),
     }))
@@ -76,7 +76,7 @@ export default function DashboardPage() {
     { label: 'Tổng giá trị hóa đơn', value: money(data.overview.total_amount), note: 'Không đồng nghĩa doanh thu hoặc chi phí', icon: Layers3, color: '#35cde8' },
     { label: 'Hóa đơn đã xác nhận', value: count(data.overview.invoice_count), note: 'Đã hoàn thành bước xác nhận', icon: FileCheck2, color: '#4ad7aa' },
     { label: 'Trung bình mỗi hóa đơn', value: money(data.overview.average_amount), note: 'Tính trên hóa đơn đã xác nhận', icon: BarChart3, color: '#928aff' },
-    { label: 'Nhà cung cấp', value: count(data.overview.supplier_count), note: 'Gộp theo MST hoặc tên', icon: UsersRound, color: '#f7bb70' },
+    { label: 'Đơn vị bán', value: count(data.overview.supplier_count), note: 'Gộp theo MST hoặc tên', icon: UsersRound, color: '#f7bb70' },
   ] : []
 
   return <div className="space-y-6 pb-8">
@@ -114,8 +114,19 @@ export default function DashboardPage() {
         </section>)}
       </div>
 
+      {data.flow_summary && <section className="grid gap-4 lg:grid-cols-3" aria-label="Phân loại giao dịch đã xác nhận">
+        {([
+          ['purchase', 'Hóa đơn mua vào', '#4ac9ee', 'Giá trị hóa đơn bên mua; không khẳng định đã thanh toán'],
+          ['sale', 'Hóa đơn bán ra', '#4de0b5', 'Giá trị hóa đơn bên bán; không khẳng định đã thu tiền'],
+          ['unknown', 'Chưa phân loại', '#f6bd79', 'Cần xác nhận hướng giao dịch tại trang Hóa đơn'],
+        ] as const).map(([flow, label, color, note]) => <div className="app-card p-5" key={flow}>
+          <p className="text-sm font-semibold" style={{ color }}>{label}</p>
+          <p className="mt-3 text-2xl font-extrabold text-white">{money(data.flow_summary[flow]?.total_amount ?? '0')}</p>
+          <p className="mt-2 text-xs text-[#93adc7]">{data.flow_summary[flow]?.invoice_count ?? 0} hóa đơn · {note}</p>
+        </div>)}
+      </section>}
       <section className="flex flex-col gap-2 rounded-2xl border border-[#365570] bg-[#10253b]/90 p-4 text-sm text-[#accce3] sm:flex-row sm:items-center sm:justify-between">
-        <span className="flex items-center gap-2"><CircleHelp size={18} className="shrink-0 text-[#65d8ee]"/><span><strong className="text-[#d7f4ff]">Chưa phân loại thu / chi.</strong> Không thể suy ra doanh thu, chi phí hay lợi nhuận từ hóa đơn hiện có.</span></span>
+        <span className="flex items-center gap-2"><CircleHelp size={18} className="shrink-0 text-[#65d8ee]"/><span><strong className="text-[#d7f4ff]">Phân loại theo hướng hóa đơn, không theo thanh toán.</strong> Không suy ra tiền đã thu/chi, doanh thu ghi nhận hay lợi nhuận từ tổng giá trị hóa đơn.</span></span>
         <span className="shrink-0 text-xs text-[#8cb7d0]">Định hướng: doanh nghiệp nhỏ · quản lý chứng từ</span>
       </section>
       {data.overview.undated_count > 0 && <p role="note" className="rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">{data.overview.undated_count} hóa đơn thiếu ngày lập vẫn được tính trong tổng toàn thời gian nhưng không nằm trong biểu đồ theo tháng.</p>}
@@ -137,11 +148,11 @@ export default function DashboardPage() {
             </div>
           </section>
           <section className="app-card min-w-0 p-5 sm:p-6">
-            <p className="app-kicker">Composition</p><h2 className="mt-2 text-lg font-bold text-white">Cơ cấu nhà cung cấp</h2><p className="app-muted mt-1 text-xs">Theo tỷ trọng giá trị hóa đơn, không phải nhóm chi phí</p>
+            <p className="app-kicker">Composition</p><h2 className="mt-2 text-lg font-bold text-white">Cơ cấu đơn vị bán</h2><p className="app-muted mt-1 text-xs">Theo tỷ trọng giá trị hóa đơn, không phải nhóm chi phí</p>
             {charts.pie.length > 0 && charts.pie.some(row=>row.value>0) ? <>
               <div className="relative mt-3 h-[206px] min-w-0" role="img" aria-label="Biểu đồ tròn tỷ trọng giá trị hóa đơn theo nhà cung cấp"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={charts.pie} dataKey="value" nameKey="name" innerRadius={65} outerRadius={91} paddingAngle={2} stroke="#111e32" strokeWidth={2}>{charts.pie.map((entry,i)=><Cell key={entry.name+i} fill={entry.color}/>)}</Pie><Tooltip contentStyle={{background:'#15263d',border:'1px solid #355477',borderRadius:12,color:'#eaf6ff'}} formatter={v=>money(Number(v))}/></PieChart></ResponsiveContainer>
-                <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center"><span className="text-2xl font-bold text-white">{charts.top3.toFixed(1)}%</span><span className="text-[10px] text-[#95b1c9]">Top 3 đơn vị bán</span></div></div>
-              <div className="grid gap-2 sm:grid-cols-2 2xl:grid-cols-1">{charts.pie.map((entry,i)=><div key={entry.name+i} className="flex min-w-0 items-center gap-2 text-xs text-[#a9bed5]"><span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{background:entry.color}}/><span className="min-w-0 flex-1 truncate" title={entry.name}>{entry.name}</span><span className="shrink-0 font-semibold text-[#e5f4ff]">{Number(data.overview.total_amount) > 0 ? (entry.value/Number(data.overview.total_amount)*100).toFixed(1) : '0'}%</span></div>)}</div>
+                <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center"><span className="text-2xl font-bold text-white">{charts.top3.toFixed(1)}%</span><span className="text-[10px] text-[#95b1c9]">Top 3 nhà cung cấp</span></div></div>
+              <div className="grid gap-2 sm:grid-cols-2 2xl:grid-cols-1">{charts.pie.map((entry,i)=><div key={entry.name+i} className="flex min-w-0 items-center gap-2 text-xs text-[#a9bed5]"><span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{background:entry.color}}/><span className="min-w-0 flex-1 truncate" title={entry.name}>{entry.name}</span><span className="shrink-0 font-semibold text-[#e5f4ff]">{Number(data.flow_summary.purchase.total_amount) > 0 ? (entry.value/Number(data.flow_summary.purchase.total_amount)*100).toFixed(1) : '0'}%</span></div>)}</div>
               </> : <p className="app-muted mt-14 text-center text-sm">Không thể vẽ tỷ trọng khi tổng bằng 0 hoặc có giá trị âm cần bù trừ.</p>}
           </section>
         </div>
@@ -152,7 +163,7 @@ export default function DashboardPage() {
             <div className="mt-5 h-[255px] min-w-0" role="img" aria-label="Biểu đồ cột số lượng hóa đơn theo tháng"><ResponsiveContainer width="100%" height="100%"><BarChart data={charts.monthly} margin={{top:10,right:4,left:-12,bottom:0}}><CartesianGrid vertical={false} stroke="#27405d" strokeDasharray="3 6"/><XAxis dataKey="short" tick={{fill:'#8ea8c3',fontSize:11}} axisLine={false} tickLine={false}/><YAxis tick={{fill:'#8ea8c3',fontSize:11}} tickLine={false} axisLine={false} allowDecimals={false}/><Tooltip contentStyle={{background:'#15263d',border:'1px solid #355477',borderRadius:12,color:'#eaf6ff'}}/><Bar dataKey="invoice_count" name="Hóa đơn" fill="#8886ff" radius={[7,7,0,0]} maxBarSize={47}/></BarChart></ResponsiveContainer></div>
           </section>
           <section className="app-card min-w-0 p-5 sm:p-6">
-            <div className="flex flex-wrap items-start justify-between gap-2"><div><p className="app-kicker">Supplier ranking</p><h2 className="mt-2 text-lg font-bold text-white">Nhà cung cấp nổi bật</h2><p className="app-muted mt-1 text-xs">Top 6 theo tổng giá trị · Chỉ hóa đơn đã xác nhận</p></div><span className="app-pill">{data.overview.supplier_count} đơn vị</span></div>
+            <div className="flex flex-wrap items-start justify-between gap-2"><div><p className="app-kicker">Supplier ranking</p><h2 className="mt-2 text-lg font-bold text-white">Nhà cung cấp mua vào</h2><p className="app-muted mt-1 text-xs">Top 6 theo giá trị mua vào · Hóa đơn đã xác nhận</p></div><span className="app-pill">{data.overview.supplier_count} đơn vị</span></div>
             <div className="mt-5 space-y-3">{charts.top.map((supplier,i)=><div key={supplier.name+i} className="space-y-1.5"><div className="flex items-baseline justify-between gap-3 text-xs"><span className="max-w-[72%] truncate text-[#c5dbeb]" title={supplier.name}>{supplier.name}</span><span className="whitespace-nowrap font-semibold text-[#f0f7ff]">{money(supplier.amount)}</span></div><div className="h-2 overflow-hidden rounded-full bg-[#233953]"><div className="h-full rounded-full" style={{width:`${charts.top[0]?.amount ? Math.max(2, supplier.amount / charts.top[0].amount * 100) : 0}%`,background:CHART_COLORS[i%CHART_COLORS.length]}}/></div></div>)}</div>
           </section>
         </div>

@@ -33,6 +33,9 @@ def validate_analytics(data: dict[str, Any]) -> dict[str, Any]:
     supplier_count = sum(int(row.get("invoice_count", 0)) for row in suppliers)
     supplier_group_count = len(suppliers)
     supplier_total = sum((_decimal(row.get("total_amount")) for row in suppliers), Decimal("0"))
+    purchase = data.get('flow_summary', {}).get('purchase', overview)
+    purchase_count = int(purchase.get('invoice_count', 0))
+    purchase_total = _decimal(purchase.get('total_amount'))
     expected_average = (
         (total_amount / invoice_count).quantize(CENT, rounding=ROUND_HALF_UP)
         if invoice_count
@@ -56,9 +59,9 @@ def validate_analytics(data: dict[str, Any]) -> dict[str, Any]:
         },
         {
             "code": "supplier_count_reconciles",
-            "label": "Tổng số hóa đơn theo nhà cung cấp khớp tổng",
-            "passed": supplier_count == invoice_count,
-            "expected": str(invoice_count),
+            "label": "Tổng số hóa đơn theo nhà cung cấp khớp hóa đơn mua vào",
+            "passed": supplier_count == purchase_count,
+            "expected": str(purchase_count),
             "actual": str(supplier_count),
         },
         {
@@ -70,9 +73,9 @@ def validate_analytics(data: dict[str, Any]) -> dict[str, Any]:
         },
         {
             "code": "supplier_total_reconciles",
-            "label": "Tổng tiền theo nhà cung cấp khớp tổng",
-            "passed": supplier_total == total_amount,
-            "expected": format(total_amount, "f"),
+            "label": "Tổng tiền theo nhà cung cấp khớp tổng mua vào",
+            "passed": supplier_total == purchase_total,
+            "expected": format(purchase_total, "f"),
             "actual": format(supplier_total, "f"),
         },
         {
@@ -84,6 +87,14 @@ def validate_analytics(data: dict[str, Any]) -> dict[str, Any]:
         },
     ]
 
+    if 'customers' in data:
+        sale = data.get('flow_summary', {}).get('sale', {})
+        for suffix, actual, expected, label in [
+            ('count', sum(row['invoice_count'] for row in data['customers']), sale.get('invoice_count', 0), 'Số hóa đơn khách hàng khớp hóa đơn bán ra'),
+            ('total', sum((_decimal(row['total_amount']) for row in data['customers']), Decimal('0')), _decimal(sale.get('total_amount')), 'Tổng tiền khách hàng khớp tổng bán ra'),
+        ]:
+            checks.append({'code': f'customer_{suffix}_reconciles', 'label': label,
+                           'passed': actual == expected, 'expected': str(expected), 'actual': str(actual)})
     passed = all(check["passed"] for check in checks)
     return {
         "status": "passed" if passed else "warning",

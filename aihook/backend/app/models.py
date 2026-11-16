@@ -40,6 +40,27 @@ class Business(Base):
     )
 
 
+class User(Base):
+    __tablename__ = 'users'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    business_id: Mapped[int] = mapped_column(ForeignKey('businesses.id'), nullable=False, unique=True, index=True)
+    email: Mapped[str] = mapped_column(String(254), unique=True, index=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    owner_name: Mapped[str] = mapped_column(String(150), nullable=False)
+    phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class UserSession(Base):
+    __tablename__ = 'user_sessions'
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
 class Invoice(Base):
     __tablename__ = "invoices"
 
@@ -89,6 +110,13 @@ class Invoice(Base):
     total_amount: Mapped[Decimal | None] = mapped_column(
         Numeric(15, 2), nullable=True
     )
+
+    # Business-facing direction (explicit owner confirmation; never inferred as a fact).
+    flow_type: Mapped[str] = mapped_column(String(20), nullable=False, default='unknown', server_default='unknown')
+    classification_source: Mapped[str] = mapped_column(String(20), nullable=False, default='unset', server_default='unset')
+    classified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    classified_by_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    buyer_tax_code: Mapped[str | None] = mapped_column(String(30), nullable=True)
 
     verification_status: Mapped[str] = mapped_column(
         String(30),

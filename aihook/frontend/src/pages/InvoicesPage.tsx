@@ -26,6 +26,7 @@ type InvoiceFile = File | {
 }
 
 type DisplayInvoice = {
+  flowType?: 'purchase' | 'sale' | 'unknown'
   id: string
   serverId?: number
   sourceFile?: string | null
@@ -69,12 +70,13 @@ function getStatusStyle(status: string) {
 }
 
 function toDisplayInvoice(item: Invoice): DisplayInvoice {
-  return { id: String(item.id), serverId: item.id, sourceFile: item.source_file,
+  return { id: String(item.id), serverId: item.id, flowType: item.flow_type || 'unknown', sourceFile: item.source_file,
     file: { name: item.filename, size: item.size, type: item.filename.includes('.pdf') ? 'application/pdf' : 'image/png', lastModified: 0 },
     status: displayStatus(item.status), addedAt: item.created_at }
 }
 
 export default function InvoicesPage() {
+  const [savingFlowId, setSavingFlowId] = useState<number | null>(null)
   const [importMode, setImportMode] = useState('single')
   const [splittingId, setSplittingId] = useState<number | null>(null)
   const [keyword, setKeyword] = useState('')
@@ -106,6 +108,7 @@ export default function InvoicesPage() {
         const savedInvoices: DisplayInvoice[] = data.map((item: Invoice) => ({
           id: String(item.id),
           serverId: item.id,
+          flowType: item.flow_type || 'unknown',
           sourceFile: item.source_file,
           file: {
             name: item.filename,
@@ -405,6 +408,19 @@ export default function InvoicesPage() {
     setPreview(null)
   }
 
+  async function changeFlow(invoice: DisplayInvoice, flowType: 'purchase' | 'sale' | 'unknown') {
+    if (!invoice.serverId || savingFlowId) return
+    setSavingFlowId(invoice.serverId)
+    try {
+      await api.setInvoiceFlow(invoice.serverId, flowType)
+      setInvoices(current => current.map(row => row.id === invoice.id ? { ...row, flowType } : row))
+    } catch (reason) {
+      setErrors(current => [...current, reason instanceof Error ? reason.message : 'Không lưu được loại hóa đơn.'])
+    } finally {
+      setSavingFlowId(null)
+    }
+  }
+
   const filteredInvoices = invoices.filter((invoice) =>
     invoice.file.name.toLowerCase().includes(keyword.trim().toLowerCase()),
   )
@@ -618,6 +634,18 @@ export default function InvoicesPage() {
                       <Clock3 size={13} />
                       {invoice.status}
                     </span>
+
+                    {invoice.serverId && <label className="flex flex-col gap-1 text-xs text-[#b4cbdb]" title="Hướng hóa đơn theo doanh nghiệp đăng ký (cần người dùng xác nhận)">
+                      <span>Hướng hóa đơn</span>
+                      <select className="rounded-lg border border-[#35607d] bg-[#102337] px-2 py-1.5 text-xs text-[#ddf4ff]" value={invoice.flowType || 'unknown'}
+                              disabled={savingFlowId === invoice.serverId}
+                              aria-label={`Phân loại ${invoice.file.name}`}
+                              onChange={event => void changeFlow(invoice, event.target.value as 'purchase' | 'sale' | 'unknown')}>
+                        <option value="unknown">Chưa phân loại</option>
+                        <option value="purchase">Mua vào</option>
+                        <option value="sale">Bán ra</option>
+                      </select>
+                    </label>}
 
                     {/* Nút Xem trước */}
                     <button

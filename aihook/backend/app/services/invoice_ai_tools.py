@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.models import Invoice
 from app.services.analytics_service import get_analytics
 from app.services.numerical_validation import validate_analytics
+from app.services.invoice_intelligence import partner_rankings, invoice_extremes, recommendations, compare_data_windows
 
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,23 @@ class RangeArgs(BaseModel):
 class SupplierArgs(RangeArgs):
     sort_by: Literal["amount", "count"] = "amount"
     limit: int = Field(default=10, ge=1, le=30)
+
+
+class RankingArgs(RangeArgs):
+    limit: int = Field(default=5, ge=1, le=30)
+
+
+class ExtremesArgs(RangeArgs):
+    mode: Literal['earliest', 'latest', 'both'] = 'both'
+
+
+class RecommendationArgs(RangeArgs):
+    count: int = Field(default=5, ge=1, le=10)
+
+
+class WindowArgs(RangeArgs):
+    earliest_months: int = Field(default=3, ge=1, le=24)
+    latest_months: int = Field(default=3, ge=1, le=24)
 
 
 class SearchInvoicesArgs(RangeArgs):
@@ -129,7 +147,7 @@ INVOICE_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_supplier_summary",
-            "description": "Xếp hạng nhà cung cấp theo tổng giá trị hoặc số lượng hóa đơn, đồng thời tính tỷ trọng bằng backend.",
+            "description": "Xếp hạng nhà cung cấp chỉ từ hóa đơn mua vào đã xác nhận theo giá trị hoặc số lượng. Tỷ trọng tính trên tổng mua vào; dùng get_supplier_rankings nếu cần cả hai bảng.",
             "parameters": _object_schema({
                 **_DATE_RANGE_PROPERTIES,
                 "sort_by": {"type": "string", "enum": ["amount", "count"], "description": "amount: tổng giá trị; count: số hóa đơn."},
@@ -178,6 +196,16 @@ INVOICE_TOOLS = [
         },
     },
 ]
+
+for _name, _description, _schema in [
+    ('get_supplier_rankings', 'Hai bảng xếp hạng nhà cung cấp theo giá trị và số lượng, chỉ hóa đơn mua vào.', RankingArgs),
+    ('get_customer_rankings', 'Hai bảng xếp hạng khách hàng theo giá trị và số lượng, chỉ hóa đơn bán ra.', RankingArgs),
+    ('get_invoice_date_extremes', 'Tìm hóa đơn có ngày lập sớm nhất, gần nhất hoặc cả hai và khoảng cách ngày.', ExtremesArgs),
+    ('get_invoice_recommendations', 'Khuyến nghị quản lý dữ liệu hóa đơn theo số lượng được yêu cầu.', RecommendationArgs),
+    ('compare_invoice_data_windows', 'So sánh các tháng sớm nhất và gần nhất dựa trên ngày hóa đơn thực tế, không tự đoán tháng không có dữ liệu.', WindowArgs),
+]:
+    INVOICE_TOOLS.append({'type': 'function', 'function': {
+        'name': _name, 'description': _description, 'parameters': _schema.model_json_schema()}})
 
 
 def _intersect_range(
@@ -261,10 +289,24 @@ def execute_invoice_tool(
         return {"error": "Tham số công cụ phải là một object JSON."}
 
     try:
+        schemas = {'get_supplier_rankings': RankingArgs, 'get_customer_rankings': RankingArgs,
+                   'get_invoice_date_extremes': ExtremesArgs, 'get_invoice_recommendations': RecommendationArgs,
+                   'compare_invoice_data_windows': WindowArgs}
+        if name in schemas:
+            args = schemas[name].model_validate(arguments)
+            start, end = _intersect_range(args.start_date, args.end_date, scope_start, scope_end)
+            if name in ('get_supplier_rankings', 'get_customer_rankings'):
+                return partner_rankings(db, business_id, start, end,
+                                        'supplier' if name == 'get_supplier_rankings' else 'customer', args.limit)
+            if name == 'get_invoice_date_extremes':
+                return invoice_extremes(db, business_id, start, end, args.mode)
+            if name == 'compare_invoice_data_windows':
+                return compare_data_windows(db, business_id, start, end, args.earliest_months, args.latest_months)
+            return recommendations(db, business_id, start, end, args.count)
         if name == "get_invoice_overview":
             args = RangeArgs.model_validate(arguments)
             data = _analytics_in_scope(db, business_id, args.start_date, args.end_date, scope_start, scope_end)
-            return {"overview": data["overview"], "validation": validate_analytics(data)}
+            return {"overview": data["overview"], "flow_summary": data["flow_summary"], "validation": validate_analytics(data)}
 
         if name == "get_monthly_summary":
             args = RangeArgs.model_validate(arguments)
@@ -282,11 +324,11 @@ def execute_invoice_tool(
             suppliers = list(data["suppliers"])
             if args.sort_by == "count":
                 suppliers.sort(key=lambda row: (-row["invoice_count"], -Decimal(row["total_amount"]), row["seller_name"]))
-            total = Decimal(data["overview"]["total_amount"])
+            total = Decimal(data['flow_summary']['purchase']['total_amount'])
             for row in suppliers:
                 row["share_percent"] = _percentage(Decimal(row["total_amount"]), total)
             return {
-                "total_amount": data["overview"]["total_amount"],
+                "total_amount": _money(total),
                 "sort_by": args.sort_by,
                 "suppliers": suppliers[:args.limit],
                 "validation": validate_analytics(data),

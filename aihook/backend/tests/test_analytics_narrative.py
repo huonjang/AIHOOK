@@ -7,6 +7,24 @@ from app.routers import chat
 from app.services.analytics_narrative import build_observations, build_recommendations
 
 
+def test_data_recommendations_do_not_introduce_business_strategy():
+    results = [(name, {}) for name in ('get_invoice_overview', 'get_monthly_summary', 'get_supplier_summary')]
+    text = ' '.join(build_recommendations('Cho 5 khuyến nghị quản lý dữ liệu hóa đơn', results))
+    assert 'mã số thuế' in text
+    assert 'OCR' in text
+    assert not any(term in text for term in ('hợp tác', 'lợi nhuận', 'chiến lược', 'chất lượng thực tế'))
+
+
+def test_consistency_question_returns_checks_instead_of_trends():
+    result = {'validation': {'checks': [
+        {'code': 'total', 'label': 'Tổng tiền', 'passed': True},
+        {'code': 'monthly', 'label': 'Theo tháng', 'passed': False},
+    ]}}
+    observations = build_observations([('get_monthly_summary', result)],
+                                    question='Kiểm tra tính nhất quán giữa tổng tiền và thống kê theo tháng.')
+    assert observations == ['Đối chiếu số học: 1/2 phép kiểm tra khớp.', 'Chưa khớp: Theo tháng.']
+
+
 def _put(sessions):
     with sessions() as db:
         for number, amount, seller, day in (
@@ -19,7 +37,7 @@ def _put(sessions):
             db.add(Invoice(
                 business_id=1, file_name='test.pdf', file_path='test.pdf', invoice_number=number,
                 seller_name=seller, total_amount=Decimal(amount), invoice_date=day,
-                verification_status='confirmed',
+                verification_status='confirmed', flow_type='purchase',
             ))
         db.commit()
 
@@ -132,7 +150,7 @@ def test_ai_returns_qualitative_facts_even_if_model_only_acknowledges(client, mo
         return {'role':'assistant', 'content': 'Mình đã truy vấn dữ liệu. Các số liệu chính xác được hiển thị bên dưới.'}
     monkeypatch.setattr(chat, '_call_model', fake_call)
     response = api.post('/api/chat', json={
-        'message': 'Hãy phân tích tổng quan hóa đơn và cho tôi nhận xét.', 'use_ai': True,
+        'message': 'Hãy phân tích tổng thể hóa đơn và cho tôi nhận xét.', 'use_ai': True,
     })
     assert response.status_code == 200
     body = response.json()

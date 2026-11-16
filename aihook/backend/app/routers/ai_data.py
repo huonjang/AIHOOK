@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.security import current_business_id
 from app.database import get_db
 from app.models import Business
 from app.services.invoice_queries import get_invoice_summary
@@ -17,7 +18,8 @@ router = APIRouter(
 
 @router.get("/summary")
 def invoice_summary_endpoint(
-    business_id: int = Query(default=1, ge=1),
+    business_id: int | None = Query(default=None, ge=1),
+    active_business_id: int = Depends(current_business_id),
     start_date: date | None = Query(default=None),
     end_date: date | None = Query(default=None),
     db: Session = Depends(get_db),
@@ -39,8 +41,10 @@ def invoice_summary_endpoint(
             detail="start_date must be on or before end_date",
         )
 
+    if business_id is not None and business_id != active_business_id:
+        raise HTTPException(403, 'Không được truy cập dữ liệu doanh nghiệp khác.')
     business = db.scalar(
-        select(Business).where(Business.id == business_id)
+        select(Business).where(Business.id == active_business_id)
     )
 
     if business is None:
@@ -51,7 +55,7 @@ def invoice_summary_endpoint(
 
     result = get_invoice_summary(
         db=db,
-        business_id=business_id,
+        business_id=active_business_id,
         start_date=start_date,
         end_date=end_date,
     )

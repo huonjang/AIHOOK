@@ -15,7 +15,7 @@ def seed(sessions):
             (date(2026,3,1),'888','uploaded',1,'X',None),
             (date(2026,3,1),'777','confirmed',2,'Other',None),
         ]:
-            db.add(Invoice(business_id=business,file_name='sample.pdf',file_path='sample.pdf',invoice_date=day,total_amount=Decimal(amount),verification_status=status,seller_name=name,seller_tax_code=tax))
+            db.add(Invoice(business_id=business,flow_type='purchase',file_name='sample.pdf',file_path='sample.pdf',invoice_date=day,total_amount=Decimal(amount),verification_status=status,seller_name=name,seller_tax_code=tax))
         db.commit()
 
 
@@ -53,7 +53,7 @@ def test_invalid_ranges_and_business(client):
     for query in ['start_date=2026-01-01','start_date=2026-03-01&end_date=2026-01-01']:
         assert api.get('/api/analytics/dashboard?'+query).status_code==400
     assert api.get('/api/analytics/dashboard?start_date=bad&end_date=bad').status_code==422
-    assert api.get('/api/analytics/dashboard?business_id=99').status_code==404
+    assert api.get('/api/analytics/dashboard?business_id=99').status_code==403
 
 
 def test_undated_legacy_invoice(client):

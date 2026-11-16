@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Depends, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import fitz
@@ -17,6 +17,12 @@ from app.models import Business, Invoice, InvoiceAnalysis
 from app.ocr_service import (
     MAX_IMAGE_PIXELS, MAX_PDF_PAGES, extract_fields, extract_text, normalize_text,
 )
+from pydantic import BaseModel
+from typing import Literal
+from app.models import User, UserSession  # ensure account tables registered in metadata
+from app.security import current_business_id, current_user
+from app.services.invoice_direction import suggest_flow
+from app.routers.auth import router as auth_router
 from app.routers.ai_data import router as ai_data_router
 from app.routers.analytics import router as analytics_router
 from app.routers.chat import router as chat_router
@@ -44,7 +50,13 @@ def init_database():
     # Additive migration: existing data remains intact.
     existing = {c['name'] for c in inspect(engine).get_columns('invoices')}
     with engine.begin() as connection:
-        for name, kind in [('source_file', 'VARCHAR(1000)'), ('source_page', 'INTEGER')]:
+        for name, kind in [
+            ('source_file', 'VARCHAR(1000)'), ('source_page', 'INTEGER'),
+            ('flow_type', "VARCHAR(20) NOT NULL DEFAULT 'unknown'"),
+            ('classification_source', "VARCHAR(20) NOT NULL DEFAULT 'unset'"),
+            ('classified_at', 'DATETIME'), ('classified_by_user_id', 'INTEGER'),
+            ('buyer_tax_code', 'VARCHAR(30)'),
+        ]:
             if name not in existing:
                 connection.execute(sql_text(f'ALTER TABLE invoices ADD COLUMN {name} {kind}'))
 
@@ -84,9 +96,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(ai_data_router)
-app.include_router(analytics_router)
-app.include_router(chat_router)
+app.include_router(auth_router)  # signup and login are public
+app.include_router(ai_data_router, dependencies=[Depends(current_business_id)])
+app.include_router(analytics_router, dependencies=[Depends(current_business_id)])
+app.include_router(chat_router, dependencies=[Depends(current_business_id)])
 
 
 # --------------------------------------------------
@@ -96,6 +109,8 @@ app.include_router(chat_router)
 def serialize_invoice(invoice: Invoice) -> dict:
     file_path = UPLOAD_DIR / invoice.file_path
     return {
+        "flow_type": invoice.flow_type or 'unknown',
+        "classification_source": invoice.classification_source or 'unset',
         "source_file": invoice.source_file,
         "source_page": invoice.source_page,
         "id": invoice.id,
@@ -149,7 +164,7 @@ def validate_upload_content(path: Path, extension: str) -> None:
 
 
 @app.post("/api/invoices/upload")
-async def upload_invoice(file: UploadFile = File(...), import_mode: str = Form("single")):
+async def upload_invoice(file: UploadFile = File(...), import_mode: str = Form("single"), business_id: int = Depends(current_business_id)):
     if import_mode not in {"single", "per_page"}:
         raise HTTPException(400, "Chế độ nhập không hợp lệ.")
     original_name = Path(file.filename or "").name
@@ -192,10 +207,10 @@ async def upload_invoice(file: UploadFile = File(...), import_mode: str = Form("
         validate_upload_content(destination, extension)
 
         if import_mode == "per_page" and extension == ".pdf":
-            return import_pdf_pages(destination, original_name)
+            return import_pdf_pages(destination, original_name, business_id=business_id)
 
         with SessionLocal() as db:
-            business = db.get(Business, 1)
+            business = db.get(Business, business_id)
             if business is None:
                 raise HTTPException(
                     status_code=500,
@@ -216,7 +231,7 @@ async def upload_invoice(file: UploadFile = File(...), import_mode: str = Form("
 
         # File đã được lưu: lỗi OCR không làm mất file, người dùng có thể thử lại.
         try:
-            analysis_result = analyze_invoice(str(result["id"]))
+            analysis_result = analyze_invoice(str(result["id"]), business_id=business_id)
             result["status"] = analysis_result["verification_status"]
         except HTTPException as exc:
             result["processing_error"] = str(exc.detail)
@@ -235,9 +250,9 @@ async def upload_invoice(file: UploadFile = File(...), import_mode: str = Form("
 # --------------------------------------------------
 
 @app.get("/api/invoices")
-def list_invoices():
+def list_invoices(business_id: int = Depends(current_business_id)):
     with SessionLocal() as db:
-        statement = select(Invoice).order_by(Invoice.id.desc())
+        statement = select(Invoice).where(Invoice.business_id == business_id).order_by(Invoice.id.desc())
         invoices = db.scalars(statement).all()
         return [serialize_invoice(invoice) for invoice in invoices]
 
@@ -247,7 +262,7 @@ def list_invoices():
 # --------------------------------------------------
 
 @app.get("/api/invoices/{invoice_id}/file")
-def get_invoice_file(invoice_id: str):
+def get_invoice_file(invoice_id: str, business_id: int = Depends(current_business_id)):
     with SessionLocal() as db:
         try:
             numeric_id = int(invoice_id)
@@ -258,7 +273,7 @@ def get_invoice_file(invoice_id: str):
             )
 
         invoice = db.get(Invoice, numeric_id)
-        if invoice is None:
+        if invoice is None or invoice.business_id != business_id:
             raise HTTPException(
                 status_code=404,
                 detail="Không tìm thấy hóa đơn.",
@@ -359,6 +374,7 @@ def serialize_analysis(invoice: Invoice, analysis: InvoiceAnalysis) -> dict:
         "raw_text": analysis.raw_text,
         "analyzed_at": analysis.analyzed_at.isoformat() if analysis.analyzed_at else None,
         "verification_status": invoice.verification_status,
+        "flow_type": invoice.flow_type or 'unknown',
         "validation": validate_ocr_fields(extract_fields(analysis.raw_text), analysis.raw_text),
         "ocr_fields": {
             "invoice_number": analysis.invoice_number,
@@ -374,7 +390,7 @@ def serialize_analysis(invoice: Invoice, analysis: InvoiceAnalysis) -> dict:
 # --------------------------------------------------
 
 @app.post("/api/invoices/{invoice_id}/analyze")
-def analyze_invoice(invoice_id: str):
+def analyze_invoice(invoice_id: str, business_id: int = Depends(current_business_id)):
     with SessionLocal() as db:
         try:
             numeric_id = int(invoice_id)
@@ -385,7 +401,7 @@ def analyze_invoice(invoice_id: str):
             )
 
         invoice = db.get(Invoice, numeric_id)
-        if invoice is None:
+        if invoice is None or invoice.business_id != business_id:
             raise HTTPException(
                 status_code=404,
                 detail="Không tìm thấy hóa đơn.",
@@ -468,7 +484,7 @@ def analyze_invoice(invoice_id: str):
 
 
 @app.get("/api/invoices/{invoice_id}/analysis")
-def get_invoice_analysis(invoice_id: str):
+def get_invoice_analysis(invoice_id: str, business_id: int = Depends(current_business_id)):
     try:
         numeric_id = int(invoice_id)
     except ValueError:
@@ -480,7 +496,7 @@ def get_invoice_analysis(invoice_id: str):
     with SessionLocal() as db:
         invoice = db.get(Invoice, numeric_id)
 
-        if invoice is None:
+        if invoice is None or invoice.business_id != business_id:
             raise HTTPException(
                 status_code=404,
                 detail="Không tìm thấy hóa đơn.",
@@ -502,7 +518,7 @@ def get_invoice_analysis(invoice_id: str):
 # --------------------------------------------------
 
 @app.delete("/api/invoices/{invoice_id}")
-def delete_invoice(invoice_id: str):
+def delete_invoice(invoice_id: str, business_id: int = Depends(current_business_id)):
     with SessionLocal() as db:
         try:
             numeric_id = int(invoice_id)
@@ -513,7 +529,7 @@ def delete_invoice(invoice_id: str):
             )
 
         invoice = db.get(Invoice, numeric_id)
-        if invoice is None:
+        if invoice is None or invoice.business_id != business_id:
             raise HTTPException(
                 status_code=404,
                 detail="Không tìm thấy hóa đơn.",
@@ -539,11 +555,11 @@ def delete_invoice(invoice_id: str):
 
 @app.patch("/api/invoices/{invoice_id}/review")
 @app.post("/api/invoices/{invoice_id}/confirm")
-def manual_changes_disabled(invoice_id: str):
+def manual_changes_disabled(invoice_id: str, business_id: int = Depends(current_business_id)):
     raise HTTPException(status_code=410, detail="Đã bỏ chỉnh sửa và xác nhận thủ công. Hệ thống tự ghi nhận sau OCR.")
 
 
-def import_pdf_pages(source: Path, original_name: str, replace_id: int | None = None):
+def import_pdf_pages(source: Path, original_name: str, business_id: int, replace_id: int | None = None):
     """Split only when explicitly selected; each child keeps source and page provenance."""
     paths = []
     try:
@@ -559,7 +575,7 @@ def import_pdf_pages(source: Path, original_name: str, replace_id: int | None = 
                 # Serialize conversion to avoid two requests replacing the same legacy row.
                 db.execute(sql_text('BEGIN IMMEDIATE'))
                 old = db.get(Invoice, replace_id)
-                if old is None or old.source_file:
+                if old is None or old.business_id != business_id or old.source_file:
                     raise HTTPException(409, "Hóa đơn đã được tách hoặc không còn tồn tại.")
                 old_analysis = db.get(InvoiceAnalysis, str(replace_id))
                 if old_analysis:
@@ -567,7 +583,7 @@ def import_pdf_pages(source: Path, original_name: str, replace_id: int | None = 
                 db.delete(old)
             invoices = []
             for number, path in enumerate(paths, 1):
-                invoice = Invoice(business_id=1, file_name=f"{Path(original_name).stem} · Trang {number}.pdf",
+                invoice = Invoice(business_id=business_id, file_name=f"{Path(original_name).stem} · Trang {number}.pdf",
                                   file_path=path.name, source_file=source.name,
                                   source_page=number, verification_status="uploaded")
                 db.add(invoice)
@@ -584,17 +600,17 @@ def import_pdf_pages(source: Path, original_name: str, replace_id: int | None = 
     # OCR failures are isolated per child; uploaded pages remain available for retry.
     for result in results:
         try:
-            result['status'] = analyze_invoice(str(result['id']))['verification_status']
+            result['status'] = analyze_invoice(str(result['id']), business_id=business_id)['verification_status']
         except HTTPException as exc:
             result['processing_error'] = str(exc.detail)
     return {'invoices': results, 'invoice_count': len(results), 'message': 'Đã tách PDF theo từng trang.'}
 
 
 @app.post('/api/invoices/{invoice_id}/split-pages')
-def split_existing_pdf(invoice_id: int):
+def split_existing_pdf(invoice_id: int, business_id: int = Depends(current_business_id)):
     with SessionLocal() as db:
         invoice = db.get(Invoice, invoice_id)
-        if invoice is None:
+        if invoice is None or invoice.business_id != business_id:
             raise HTTPException(404, 'Không tìm thấy hóa đơn.')
         if invoice.source_file:
             raise HTTPException(409, 'Hóa đơn này đã được tách.')
@@ -605,4 +621,41 @@ def split_existing_pdf(invoice_id: int):
         with fitz.open(source) as document:
             if document.page_count < 2:
                 raise HTTPException(400, 'PDF chỉ có một trang, không cần tách.')
-    return import_pdf_pages(source, original_name, replace_id=invoice_id)
+    return import_pdf_pages(source, original_name, business_id=business_id, replace_id=invoice_id)
+
+
+# --------------------------------------------------
+# Classification: meaning of an invoice for the registered business
+# --------------------------------------------------
+
+class FlowUpdate(BaseModel):
+    flow_type: Literal['purchase', 'sale', 'unknown']
+
+
+@app.patch('/api/invoices/{invoice_id}/flow')
+def update_invoice_flow(invoice_id: int, payload: FlowUpdate,
+                        owner: User = Depends(current_user)):
+    with SessionLocal() as db:
+        invoice = db.get(Invoice, invoice_id)
+        if invoice is None or invoice.business_id != owner.business_id:
+            raise HTTPException(404, 'Không tìm thấy hóa đơn.')
+        invoice.flow_type = payload.flow_type
+        invoice.classification_source = 'manual' if payload.flow_type != 'unknown' else 'unset'
+        invoice.classified_by_user_id = owner.id if payload.flow_type != 'unknown' else None
+        invoice.classified_at = datetime.now(timezone.utc).replace(tzinfo=None) if payload.flow_type != 'unknown' else None
+        db.commit()
+        return {'invoice_id': invoice.id, 'flow_type': invoice.flow_type,
+                'classification_source': invoice.classification_source}
+
+
+@app.get('/api/invoices/{invoice_id}/flow-suggestion')
+def get_invoice_flow_suggestion(invoice_id: int, owner: User = Depends(current_user)):
+    with SessionLocal() as db:
+        invoice = db.get(Invoice, invoice_id)
+        if invoice is None or invoice.business_id != owner.business_id:
+            raise HTTPException(404, 'Không tìm thấy hóa đơn.')
+        business = db.get(Business, owner.business_id)
+        return {'flow_type': invoice.flow_type,
+                **suggest_flow(business_tax_code=business.tax_code if business else None,
+                               seller_tax_code=invoice.seller_tax_code,
+                               buyer_tax_code=invoice.buyer_tax_code)}
