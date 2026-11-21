@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from uuid import uuid4
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, Depends, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -13,6 +14,7 @@ from PIL import Image, UnidentifiedImageError
 from sqlalchemy import select, inspect, text as sql_text
 
 from app.database import Base, SessionLocal, engine
+from app.aihook_seller_extractor import extract_buyer_from_text
 from app.models import Business, Invoice, InvoiceAnalysis
 from app.ocr_service import (
     MAX_IMAGE_PIXELS, MAX_PDF_PAGES, extract_fields, extract_text, normalize_text,
@@ -34,6 +36,7 @@ from app.routers.chat import router as chat_router
 # --------------------------------------------------
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -457,6 +460,9 @@ def analyze_invoice(invoice_id: str, business_id: int = Depends(current_business
         invoice.invoice_date = parse_invoice_date(fields.get("invoice_date"))
         invoice.seller_name = fields.get("seller_name")
         invoice.seller_tax_code = fields.get("tax_code")
+        buyer = extract_buyer_from_text(text)
+        invoice.buyer_name = buyer["name"] or invoice.buyer_name
+        invoice.buyer_tax_code = buyer["tax_id"] or invoice.buyer_tax_code
         invoice.total_amount = parse_amount(fields.get("total_amount"))
 
         validation = validate_ocr_fields(fields, analysis.raw_text)

@@ -253,6 +253,8 @@ def _invoice_dict(invoice: Invoice) -> dict[str, Any]:
         "seller_name": invoice.seller_name,
         "seller_tax_code": invoice.seller_tax_code,
         "buyer_name": invoice.buyer_name,
+        "flow_type": invoice.flow_type,
+        "buyer_tax_code": invoice.buyer_tax_code,
         "subtotal": _optional_money(invoice.subtotal),
         "tax_amount": _optional_money(invoice.tax_amount),
         "total_amount": _optional_money(invoice.total_amount),

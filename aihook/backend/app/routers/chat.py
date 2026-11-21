@@ -478,6 +478,228 @@ def _normalize_model_calls(question: str, calls: list[dict]) -> list[dict]:
     return calls
 
 
+def _answer_exact_invoice_question(
+    question: str,
+    db: Session,
+    business_id: int,
+    scope_start: date | None,
+    scope_end: date | None,
+) -> dict | None:
+    """Read exact MV/BR invoices from the authorized DB, not guessed model arguments."""
+    code_matches = list(re.finditer(r'\b(?:MV|BR)-\d{4}-\d{4,}\b', question, re.IGNORECASE))
+    if len(code_matches) != 1:
+        return None  # Do not silently select one code from multi-invoice questions.
+
+    invoice_code = code_matches[0].group(0)
+    name = 'get_invoice_details'
+    result = execute_invoice_tool(
+        name=name,
+        arguments={'invoice_number': invoice_code},
+        db=db,
+        business_id=business_id,
+        scope_start=scope_start,
+        scope_end=scope_end,
+    )
+
+    evidence = []
+    sources = _collect_sources([(name, result)])
+    validation = _collect_validation([(name, result)])
+    if 'error' in result:
+        answer = 'Không thể tra cứu hóa đơn ' + invoice_code + ': ' + str(result['error'])
+    elif not result.get('found'):
+        answer = f'Không tìm thấy hóa đơn {invoice_code} đã xác nhận trong phạm vi bộ lọc hiện tại.'
+    elif result.get('match_count') != 1:
+        answer = f'Có nhiều bản ghi mang mã {invoice_code}; cần cung cấp ID hóa đơn để xác định chính xác.'
+    else:
+        invoice = result['invoices'][0]
+        code = invoice['invoice_number'] or invoice_code
+        q = normalize_text(question).lower()
+
+        def shown(value):
+            return str(value).strip() if value is not None and str(value).strip() else 'chưa có dữ liệu'
+
+        direction = {'purchase': 'mua vào', 'sale': 'bán ra', 'unknown': 'chưa phân loại'}
+        flow = direction.get(invoice.get('flow_type'), 'chưa phân loại')
+        seller = shown(invoice.get('seller_name'))
+        seller_tax = shown(invoice.get('seller_tax_code'))
+        buyer = shown(invoice.get('buyer_name'))
+        buyer_tax = shown(invoice.get('buyer_tax_code'))
+        total = _display_amount(invoice.get('total_amount'))
+        day = shown(invoice.get('invoice_date'))
+
+        if any(s in q for s in ('don gia', 'so luong', 'hang hoa', 'san pham',
+                                'mat hang', 'bao nhieu tui', 'bao nhieu lon',
+                                'pate', 'cat ve sinh', 'bentonite')):
+            answer = f'Hóa đơn {code}: database hiện chưa lưu chi tiết dòng hàng hóa, số lượng hoặc đơn giá; cần đối chiếu PDF/JSON gốc.'
+        elif 'ma so thue' in q or 'mst' in q:
+            if any(s in q for s in ('nguoi mua', 'ben mua', 'don vi mua')):
+                answer = f'MST người mua trên hóa đơn {code}: {buyer_tax}.'
+            elif any(s in q for s in ('nguoi ban', 'ben ban', 'don vi ban', 'nha cung cap')):
+                answer = f'MST người bán trên hóa đơn {code}: {seller_tax}.'
+            else:
+                answer = f'Hóa đơn {code}: MST người bán {seller_tax}; MST người mua {buyer_tax}.'
+        elif ('nguoi ban' in q or 'don vi ban' in q or 'nha cung cap' in q) and (
+            'nguoi mua' in q or 'don vi mua' in q
+        ):
+            answer = f'Hóa đơn {code}: người bán {seller}; người mua {buyer}.'
+        elif any(s in q for s in ('nguoi ban', 'don vi ban', 'nha cung cap', 'ben ban')):
+            answer = f'Người bán trên hóa đơn {code}: {seller}.'
+        elif any(s in q for s in ('nguoi mua', 'don vi mua', 'ben mua', 'doanh nghiep cua toi')):
+            answer = f'Người mua trên hóa đơn {code}: {buyer}.'
+        elif any(s in q for s in ('mua vao', 'ban ra', 'loai hoa don', 'huong giao dich')):
+            answer = (f'Hóa đơn {code} là hóa đơn {flow} theo phân loại đã lưu trong hệ thống.'
+                      if flow != 'chưa phân loại'
+                      else f'Hóa đơn {code} chưa được xác nhận là mua vào hay bán ra.')
+        elif 'truoc thue' in q or 'vat' in q or 'tien hang' in q:
+            subtotal = invoice.get('subtotal')
+            tax = invoice.get('tax_amount')
+            if subtotal is None or tax is None:
+                answer = f'Hóa đơn {code}: chưa lưu đủ tiền trước thuế và VAT để đối chiếu tổng; cần kiểm tra file nguồn.'
+            else:
+                answer = (f'Hóa đơn {code}: trước thuế {_display_amount(subtotal)}, '
+                          f'VAT {_display_amount(tax)}, tổng {total}.')
+        elif any(s in q for s in ('tong tien', 'tong gia tri', 'gia tri hoa don', 'bao nhieu tien')):
+            answer = f'Tổng tiền hóa đơn {code}: {total}.'
+        elif 'so hoa don' in q and ('so in' in q or 'noi bo' in q):
+            answer = f'Mã hóa đơn trong database là {code}; chưa có trường số in trên PDF để xác nhận có giống nhau hay không.'
+        elif any(s in q for s in ('ngay lap', 'duoc lap ngay', 'thuoc nam nao')):
+            answer = f'Hóa đơn {code} lập ngày {day}.'
+        else:
+            answer = (f'Hóa đơn {code}: người bán {seller}; MST người bán {seller_tax}; '
+                      f'người mua {buyer}; MST người mua {buyer_tax}; '
+                      f'loại {flow}; ngày lập {day}; tổng tiền {total}.')
+
+        evidence = [{
+            'title': f'Tra cứu hóa đơn {code}',
+            'columns': ['Trường', 'Giá trị'],
+            'rows': [
+                ['Mã hóa đơn', code],
+                ['Người bán', seller],
+                ['MST người bán', seller_tax],
+                ['Người mua', buyer],
+                ['MST người mua', buyer_tax],
+                ['Loại hóa đơn', flow],
+                ['Ngày lập', day],
+                ['Tổng tiền', total],
+            ],
+        }]
+
+    return {
+        'answer': answer,
+        'evidence': evidence,
+        'sources': sources,
+        'validation': validation,
+        'tools_used': [name],
+        'intent': 'exact_invoice_lookup',
+    }
+
+
+def _answer_direction_counts_or_largest_invoice(
+    question: str,
+    db: Session,
+    business_id: int,
+    scope_start: date | None,
+    scope_end: date | None,
+) -> dict | None:
+    """Route unambiguous factual questions to verified read-only backend tools."""
+    q = ' '.join(normalize_text(question).lower().split()).strip(' ?!.,;:')
+
+    # Chỉ bắt câu hỏi ĐẾM hai hướng; đừng bắt 'so sánh số lượng',
+    # 'giá trị trung bình', 'phân tích theo tháng' hoặc các câu hỏi tổng quát.
+    explicit_count = bool(
+        re.search(r'\bbao nhieu hoa don mua vao\s+va\s+(?:bao nhieu hoa don )?ban ra\b', q)
+        or re.search(r'\bso luong hoa don mua vao\s+va\s+(?:so luong hoa don |hoa don )?ban ra\b', q)
+    )
+    analysis_terms = (
+        'so sanh', 'phan tich', 'trung binh', 'tong gia tri',
+        'theo thang', 'tung thang', 'xu huong', 'bien dong',
+    )
+    # Không bỏ qua bộ lọc ngày của giao diện, nhưng đừng tự phớt lờ ngày
+    # được nói riêng trong câu hỏi (tháng/năm/quý chưa nằm trong bộ lọc).
+    explicit_period = bool(re.search(
+        r'\b(?:thang\s+\d|nam\s+\d|quy\s+\d|hom nay|hom qua|tuan nay|'
+        r'tu ngay|den ngay|\d{4}[-/]\d{1,2})\b', q,
+    ))
+    wants_flow_counts = explicit_count and not explicit_period and not any(
+        term in q for term in analysis_terms
+    )
+
+    # Chỉ chọn hóa đơn duy nhất có giá trị lớn nhất. 'Tìm 5/Top 5 hóa đơn'
+    # phải tiếp tục đi theo intent top_invoices (trả danh sách, không phải 1).
+    singular_invoice = bool(re.match(
+        r'^(?:hoa don nao|hoa don co|tim 1 hoa don|top 1 hoa don)\b', q,
+    ))
+    wants_largest_invoice = (
+        singular_invoice
+        and not explicit_period
+        and any(term in q for term in (
+            'gia tri lon nhat', 'gia tri cao nhat',
+            'tong tien lon nhat', 'tong tien cao nhat',
+        ))
+        and not any(term in q for term in (
+            'nha cung cap', 'khach hang', 'don vi ban',
+            'so sanh', 'phan tich', 'trung binh',
+        ))
+        and not re.search(r'\b(?:tim|top)\s+(?:[2-9]|\d{2,})\s+hoa don\b', q)
+    )
+    if not wants_flow_counts and not wants_largest_invoice:
+        return None
+
+    if wants_flow_counts:
+        name = 'get_invoice_overview'
+        result = execute_invoice_tool(name, {}, db, business_id, scope_start, scope_end)
+        if 'error' in result:
+            answer = 'Không thể thống kê mua vào/bán ra: ' + str(result['error'])
+            evidence = []
+        else:
+            summary = result.get('flow_summary') or {}
+            purchases = summary.get('purchase') or {}
+            sales = summary.get('sale') or {}
+            unknown = summary.get('unknown') or {}
+            p = int(purchases.get('invoice_count', 0))
+            s = int(sales.get('invoice_count', 0))
+            u = int(unknown.get('invoice_count', 0))
+            answer = (f'Trong phạm vi đang chọn, có {p} hóa đơn mua vào và '
+                      f'{s} hóa đơn bán ra đã xác nhận.')
+            if u:
+                answer += f' Ngoài ra có {u} hóa đơn chưa phân loại; không tự gán chúng vào hai nhóm.'
+            evidence = [_evidence_for_tool(name, result)]
+            evidence = [item for item in evidence if item]
+        return {
+            'answer': answer,
+            'evidence': evidence,
+            'sources': [],
+            'validation': _collect_validation([(name, result)]),
+            'tools_used': [name],
+            'intent': 'invoice_flow_counts',
+        }
+
+    name = 'search_invoices'
+    result = execute_invoice_tool(
+        name, {'sort_by': 'amount_desc', 'limit': 1},
+        db, business_id, scope_start, scope_end,
+    )
+    if 'error' in result:
+        answer = 'Không thể tìm hóa đơn có giá trị lớn nhất: ' + str(result['error'])
+    elif not result.get('invoices'):
+        answer = 'Không có hóa đơn đã xác nhận trong phạm vi đang chọn.'
+    else:
+        top = result['invoices'][0]
+        code = top.get('invoice_number') or f'ID {top["invoice_id"]}'
+        answer = (f'Hóa đơn có giá trị lớn nhất trong phạm vi đang chọn là '
+                  f'{code}, tổng giá trị {_display_amount(top.get("total_amount"))}.')
+        # This statement is based on a sorted database query, not a model guess.
+    evidence = [_evidence_for_tool(name, result)]
+    return {
+        'answer': answer,
+        'evidence': [item for item in evidence if item],
+        'sources': _collect_sources([(name, result)]),
+        'validation': _collect_validation([(name, result)]),
+        'tools_used': [name],
+        'intent': 'largest_invoice',
+    }
+
+
 def run_ai_agent(
     question: str,
     db: Session,
@@ -487,6 +709,16 @@ def run_ai_agent(
     context: dict | None = None,
 ) -> dict:
     """Route structured questions first; use the model only for open tool selection."""
+    deterministic = _answer_direction_counts_or_largest_invoice(
+        question, db, business_id, scope_start, scope_end,
+    )
+    if deterministic is not None:
+        return deterministic
+    exact_invoice = _answer_exact_invoice_question(
+        question, db, business_id, scope_start, scope_end,
+    )
+    if exact_invoice is not None:
+        return exact_invoice
     routed = process_question(question, db, business_id, scope_start, scope_end, context)
     if routed is not None:
         return routed

@@ -13,8 +13,15 @@ import fitz
 import pytesseract
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
+from .aihook_seller_extractor import BUYER_HEADERS, extract_seller_from_text
+
 MAX_PDF_PAGES = 30
 MAX_IMAGE_PIXELS = 20_000_000
+BUYER_SECTION = re.compile(
+    r"^[^\S\r\n]*(?:" + "|".join(sorted(BUYER_HEADERS))
+    + r")(?:[^\S\r\n]*\([^\r\n]*\))?[^\S\r\n]*(?:[:：]|$)",
+    re.MULTILINE,
+)
 
 
 def preprocess_image(image: Image.Image) -> Image.Image:
@@ -78,9 +85,13 @@ def normalize_text(text: str) -> str:
 def extract_fields(text: str) -> dict[str, str | None]:
     normalized, offsets = _normalized_and_offsets(text)
 
-    def find(patterns: list[str], *, preserve_original: bool = False) -> str | None:
+    def find(
+        patterns: list[str], *, preserve_original: bool = False, endpos: int | None = None,
+    ) -> str | None:
         for pattern in patterns:
-            match = re.search(pattern, normalized, re.IGNORECASE)
+            match = re.compile(pattern, re.IGNORECASE).search(
+                normalized, 0, len(normalized) if endpos is None else endpos,
+            )
             if match is None:
                 continue
             if preserve_original:
@@ -120,21 +131,25 @@ def extract_fields(text: str) -> dict[str, str | None]:
         r"\binvoice\s*(?:no\.?|number)\s*[:：.]?\s*([a-z0-9/-]+)",
     ], preserve_original=True)
 
-    seller_name = find([
+    buyer_section = BUYER_SECTION.search(normalized)
+    seller_end = buyer_section.start() if buyer_section else None
+    seller = extract_seller_from_text(text)
+
+    seller_name = seller["name"] or find([
         r"don vi ban(?: hang)?\s*(?:\(\s*seller\s*\))?\s*[:：]\s*([^\n\r]+)",
         r"ten don vi ban\s*[:：]\s*([^\n\r]+)",
         r"nguoi ban\s*[:：]\s*([^\n\r]+)",
         r"seller(?: name)?\s*[:：]\s*([^\n\r]+)",
-    ], preserve_original=True)
+    ], preserve_original=True, endpos=seller_end)
 
-    tax_code = find([
+    tax_code = seller["tax_id"] or find([
         r"ma so thue\s*(?:\(\s*tax code\s*\))?\s*[:：]\s*([0-9-]+)",
         r"tax code\s*[:：]\s*([0-9-]+)",
-    ])
+    ], endpos=seller_end)
 
-    address = find([
+    address = seller["address"] or find([
         r"dia chi\s*(?:\(\s*address\s*\))?\s*[:：]\s*([^\n\r]+)",
-    ], preserve_original=True)
+    ], preserve_original=True, endpos=seller_end)
 
     serial = find([
         r"ky hieu\s*(?:\(\s*serial no\.?\s*\))?\s*[:：]?\s*([a-z0-9/-]+)",
